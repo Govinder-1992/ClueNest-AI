@@ -254,27 +254,26 @@ async function showAppliances() {
 // ---------- sign-in screen ----------
 // Shown instead of every other screen while the app is configured and nobody is signed in.
 function renderSignIn() {
-  const why = Auth.getNotice();
-  contentEl.innerHTML = stateBox("\uD83D\uDD12", "Sign in to ClueNest AI",
-    "Sign in, or create a free account, to see your appliances.",
-    (why ? `<div class="alert alert-info" role="status">${esc(why)}</div>` : "") +
-    `<p><button class="btn btn-primary" id="signInBtn">Sign in</button> <button class="btn" id="signUpBtn">Create account</button></p>
-     <div class="field-error" id="signInError" role="alert"></div>`);
+  Landing.render(contentEl, { notice: Auth.getNotice() });
   const go = (fn) => async (ev) => {
-    ev.target.disabled = true;
+    const btn = ev.currentTarget;
+    btn.disabled = true;
     try { await fn(); } catch (e) {
-      ev.target.disabled = false;
+      btn.disabled = false;
       document.getElementById("signInError").textContent = "Sign-in could not be started. Please try again.";
     }
   };
-  document.getElementById("signInBtn").addEventListener("click", go(() => Auth.login()));
-  document.getElementById("signUpBtn").addEventListener("click", go(() => Auth.signUp()));
+  contentEl.querySelectorAll(".js-signin").forEach(b => b.addEventListener("click", go(() => Auth.login())));
+  contentEl.querySelectorAll(".js-signup").forEach(b => b.addEventListener("click", go(() => Auth.signUp())));
 }
 // ---------- router ----------
 function route() {
   const { route: r, params } = Navigation.parse();
   closeMenu();
-  if (Auth.isConfigured() && !Auth.isAuthenticated()) { renderSignIn(); return; }  const action = Navigation.ACTIONS.find(a => a.route === r);
+  const signedOut = Auth.isConfigured() && !Auth.isAuthenticated();
+  document.body.classList.toggle("landing", signedOut); // the public landing page has its own header
+  if (signedOut) { renderSignIn(); return; }
+  const action = Navigation.ACTIONS.find(a => a.route === r);
   const menu = Navigation.MENU.find(m => m.route === r);
   renderNav(action || r === "add-appliance" || r === "register-replacement" ? "appliances" : r);
   window.scrollTo(0, 0);
