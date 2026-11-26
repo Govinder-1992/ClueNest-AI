@@ -50,6 +50,29 @@ The editable draw.io source is [`docs/architecture/cluenest-aws-architecture-cle
 6. The function reads or writes DynamoDB, or calls Bedrock, or calls Google Places with the key from Secrets Manager.
 7. Every day EventBridge starts a reminder function that finds due maintenance and publishes to the user's SNS topic.
 
+### Application Workflow
+
+```mermaid
+flowchart TD
+    A([Start]) --> B[Register Appliance]
+    B --> C[My Appliances]
+    C --> D[Report a Problem]
+    D --> E[AI Troubleshooting<br/>causes and step-by-step fixes]
+    E --> F{Problem solved?}
+    F -- Yes --> G[Problem Fixed]
+    G -.-> M
+    F -- No --> H[Warranty Checker]
+    H --> I[Repair vs Replace]
+    I --> J{Decision}
+    J -- Repair --> K[Find Technician]
+    K --> L[Record Completed Repair]
+    L --> M[Maintenance and Reminders<br/>schedule next maintenance]
+    J -- Replace --> N[Register Replacement]
+    N -.-> M
+    M --> O([End])
+```
+
+Solid arrows are working today. Dashed arrows are planned: after "Problem Fixed" and after a replacement, the user can already open Maintenance and Reminders from the appliance card, but the app does not take them there automatically yet. The "Register Replacement" screen is still a placeholder.
 ### API Routes
 
 | Area | Routes |
