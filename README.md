@@ -22,9 +22,9 @@ Many people lose warranty details, forget routine maintenance and have no record
 
 ### Architecture Overview
 
-![ClueNest AI architecture](docs/architecture/cluenest-aws-architecture.png)
+![ClueNest AI architecture](docs/architecture/cluenest-aws-architecture-clean.png)
 
-A simpler version is in [`docs/architecture/cluenest-aws-architecture-simple.png`](docs/architecture/cluenest-aws-architecture-simple.png). Editable draw.io sources are in the same folder.
+The editable draw.io source is [`docs/architecture/cluenest-aws-architecture-clean.drawio`](docs/architecture/cluenest-aws-architecture-clean.drawio).
 
 ### AWS Services Used
 
@@ -83,7 +83,7 @@ ClueNest AI/
 │   │   └── cluenest-infrastructure.yaml   The single stack template
 │   ├── lambda/src/            Lambda function code (Python)
 │   └── README.md              Detailed backend documentation
-└── docs/architecture/         Architecture diagrams
+└── docs/architecture/         Architecture diagram (PNG and draw.io)
 ```
 
 ## Result & Demo
