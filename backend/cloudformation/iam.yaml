@@ -1,0 +1,63 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  ClueNest AI - Step 1: IAM.
+  Creates one reusable execution role for ClueNest AI Lambda functions.
+  The role can only write logs to CloudWatch Logs. Service-specific permissions
+  (DynamoDB, Bedrock, etc.) are added in later steps.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - test
+      - prod
+    Description: Deployment environment. It becomes part of the role name.
+
+Resources:
+  # The role that every ClueNest AI Lambda function will run as.
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ClueNestLambdaExecutionRole-${Environment}
+      Description: !Sub Execution role for ClueNest AI Lambda functions (${Environment}). CloudWatch Logs only.
+
+      # Trust policy: WHO may assume (use) this role.
+      # Only the AWS Lambda service, so only Lambda functions can run as this role.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowLambdaServiceToAssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+      # Permissions policy: WHAT the role may do.
+      # AWSLambdaBasicExecutionRole allows only logs:CreateLogGroup,
+      # logs:CreateLogStream and logs:PutLogEvents. Nothing else is attached.
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+      Tags:
+        - Key: Project
+          Value: ClueNestAI
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+Outputs:
+  LambdaExecutionRoleArn:
+    Description: ARN of the Lambda execution role. Use this as the Role of ClueNest AI Lambda functions.
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: !Sub ClueNest-${Environment}-LambdaExecutionRoleArn
+
+  LambdaExecutionRoleName:
+    Description: Name of the Lambda execution role.
+    Value: !Ref LambdaExecutionRole
+    Export:
+      Name: !Sub ClueNest-${Environment}-LambdaExecutionRoleName

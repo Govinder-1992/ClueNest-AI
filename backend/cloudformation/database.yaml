@@ -1,0 +1,80 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  ClueNest AI - Step 2: DynamoDB.
+  Creates one single-table DynamoDB table that stores appliances, troubleshooting
+  history, maintenance reminders, repair history and technician quotes for each user.
+  No IAM permissions are created here. Lambda access is added in a later step.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - test
+      - prod
+    Description: Deployment environment. It becomes part of the table name.
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+
+Resources:
+  # One table for all ClueNest AI data.
+  #   PK = USER#<Cognito sub>               (every item of one user shares this value)
+  #   SK = <TYPE>#<id>                      (APPLIANCE#, TROUBLESHOOT#, MAINTENANCE#, REPAIR#, QUOTE#)
+  # See backend/README.md for the full key patterns and access patterns.
+  ClueNestTable:
+    Type: AWS::DynamoDB::Table
+    # prod keeps the table if the stack is deleted or the resource is replaced.
+    # dev and test delete it with the stack, so no tables are left behind.
+    DeletionPolicy: !If [IsProd, Retain, Delete]
+    UpdateReplacePolicy: !If [IsProd, Retain, Delete]
+    Properties:
+      TableName: !Sub ClueNestTable-${Environment}
+      BillingMode: PAY_PER_REQUEST
+
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+
+      # Encryption at rest with the AWS managed key (alias/aws/dynamodb).
+      # No key to manage and no extra IAM permissions are needed by callers.
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+
+      # Continuous backups (restore to any second in the last 35 days): prod only.
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [IsProd, true, false]
+
+      # prod: the table cannot be deleted until protection is switched off first.
+      DeletionProtectionEnabled: !If [IsProd, true, false]
+
+      Tags:
+        - Key: Project
+          Value: ClueNestAI
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+Outputs:
+  TableName:
+    Description: Name of the ClueNest AI DynamoDB table.
+    Value: !Ref ClueNestTable
+    Export:
+      Name: !Sub ClueNest-${Environment}-TableName
+
+  TableArn:
+    Description: ARN of the ClueNest AI DynamoDB table. Use it to scope Lambda permissions to this table.
+    Value: !GetAtt ClueNestTable.Arn
+    Export:
+      Name: !Sub ClueNest-${Environment}-TableArn

@@ -1,0 +1,13 @@
+﻿__pycache__/
+*.pyc
+*.zip
+.env
+.env.*
+*.pem
+*.key
+node_modules/
+.venv/
+venv/
+.aws/
+.DS_Store
+Thumbs.db

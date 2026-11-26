@@ -1,0 +1,1616 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  ClueNest AI infrastructure. This is the only CloudFormation template for the project,
+  deployed as one stack per environment. It currently contains the IAM execution role
+  for Lambda functions, the DynamoDB table, the Lambda functions, the Cognito user
+  pool, the HTTP API and the Amazon Bedrock permission for AI troubleshooting.
+  Future services are added to this same file.
+
+# =============================================================================
+# 1. PARAMETERS
+# =============================================================================
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - test
+      - prod
+    Description: Deployment environment. It becomes part of the names of the resources.
+
+  # The Lambda code is too large for inline code (4 KB limit), so it is loaded from S3.
+  # The bucket is created outside this stack (S3 resources come in their own step).
+  # See "Packaging and deployment" in backend/README.md.
+  LambdaCodeBucket:
+    Type: String
+    AllowedPattern: "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+    ConstraintDescription: Enter an S3 bucket name (3 to 63 characters of lowercase letters, numbers, dots and hyphens).
+    Description: Name of an existing S3 bucket, in the same region, that holds the Lambda code zip file.
+
+  LambdaCodeKey:
+    Type: String
+    AllowedPattern: '^[A-Za-z0-9!_.*()/-]{1,900}[.]zip$'
+    ConstraintDescription: Enter the S3 object key of the zip file, ending in .zip.
+    Description: S3 object key of the Lambda code zip file. Use a new key for every build so changes are deployed.
+
+  # Where Cognito may send the browser after sign-in and sign-out. Cognito requires https
+  # URLs, except http://localhost for local development. Wildcards are not allowed.
+  # The default is the local development address from backend/README.md. Replace it with
+  # the real https address of the website before real users sign in (always for prod).
+  FrontendCallbackUrl:
+    Type: String
+    Default: "http://localhost:5500/"
+    AllowedPattern: '^(https://[A-Za-z0-9._~:/?&=%+-]{1,200}|http://localhost(:[0-9]{1,5})?(/[A-Za-z0-9._~:/?&=%+-]*)?)$'
+    ConstraintDescription: Enter an https URL, or http://localhost for local development. No wildcards, spaces or # fragments.
+    Description: URL the browser returns to after signing in. It must match the redirectUri in frontend/js/config.js exactly.
+
+  FrontendLogoutUrl:
+    Type: String
+    Default: "http://localhost:5500/"
+    AllowedPattern: '^(https://[A-Za-z0-9._~:/?&=%+-]{1,200}|http://localhost(:[0-9]{1,5})?(/[A-Za-z0-9._~:/?&=%+-]*)?)$'
+    ConstraintDescription: Enter an https URL, or http://localhost for local development. No wildcards, spaces or # fragments.
+    Description: URL the browser returns to after signing out. It must match the logoutUri in frontend/js/config.js exactly.
+
+  # Cognito-managed sign-in domain: https://<prefix>-<Environment>.auth.<region>.amazoncognito.com
+  # The prefix must be unique in the Region (the stack fails and rolls back if it is taken), and
+  # may not contain "aws", "amazon" or "cognito". Only lowercase letters, digits and hyphens.
+  CognitoDomainPrefix:
+    Type: String
+    Default: cluenest-ai
+    AllowedPattern: '^(?!.*(aws|amazon|cognito))[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$'
+    ConstraintDescription: Use 1 to 40 lowercase letters, digits or hyphens, not starting or ending with a hyphen, and not containing aws, amazon or cognito.
+    Description: First part of the Cognito sign-in domain. The Environment is added after it, for example cluenest-ai-dev. Changing it later changes the sign-in URL and breaks logins until frontend/js/config.js is updated.
+  # Amazon Bedrock model for POST /troubleshoot. Leave it EMPTY until a model ID has been tested
+  # with a real Converse call in this account (access AND quota). While it is empty there is no
+  # Bedrock permission and no model variable, and non-dangerous troubleshooting answers 501.
+  # See "Bedrock section" in backend/README.md. Wildcards are not allowed.
+  BedrockModelId:
+    Type: String
+    Default: ""
+    AllowedPattern: '^([A-Za-z0-9][A-Za-z0-9._:-]{2,99})?$'
+    ConstraintDescription: Leave empty, or enter a model ID or inference profile ID such as us.vendor.model-v1:0. No wildcards or spaces.
+    Description: Empty disables Bedrock. Otherwise the modelId the troubleshooting function passes to the Bedrock Converse API. For a cross-Region inference profile (us.* or global.*) enter the profile ID and also set BedrockBaseModelId.
+  BedrockBaseModelId:
+    Type: String
+    Default: ""
+    AllowedPattern: '^([A-Za-z0-9][A-Za-z0-9._:-]{2,99})?$'
+    ConstraintDescription: Leave empty, or enter a foundation model ID such as vendor.model-v1:0. No wildcards or spaces.
+    Description: Leave empty when BedrockModelId is a plain model ID. When BedrockModelId is an inference profile ID, enter the underlying foundation model ID (the profile ID without its us. or global. prefix). IAM allows only these two resources.
+# =============================================================================
+# 2. CONDITIONS
+# =============================================================================
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+  HasBedrockModel: !Not [!Equals [!Ref BedrockModelId, ""]]
+  UsesInferenceProfile: !Not [!Equals [!Ref BedrockBaseModelId, ""]]
+
+Resources:
+  # ===========================================================================
+  # 3. IAM RESOURCES
+  # ===========================================================================
+
+  # The role that every ClueNest AI Lambda function will run as.
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ClueNestLambdaExecutionRole-${Environment}
+      Description: !Sub Execution role for ClueNest AI Lambda functions (${Environment}). CloudWatch Logs plus access to the ClueNest DynamoDB table only.
+
+      # Trust policy: WHO may assume (use) this role.
+      # Only the AWS Lambda service, so only Lambda functions can run as this role.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowLambdaServiceToAssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+      # Permissions policy: WHAT the role may do.
+      # AWSLambdaBasicExecutionRole allows only logs:CreateLogGroup,
+      # logs:CreateLogStream and logs:PutLogEvents. No other managed policy is attached.
+      # Access to the DynamoDB table comes from the separate LambdaDynamoDBPolicy below.
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+      Tags:
+        - Key: Project
+          Value: ClueNestAI
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # Lets the Lambda functions use the ClueNest table, and nothing else.
+  #   Resource: this table's ARN only. No wildcards, and no index ARNs (the table has no indexes).
+  #   GetItem, Query    read one item, or read one user's items
+  #   PutItem           create and replace items (also covers the "mark complete" transaction)
+  #   DeleteItem        delete items
+  # Not allowed: Scan, UpdateItem, batch operations, or any table or backup management.
+  LambdaDynamoDBPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub ClueNestLambdaDynamoDBAccess-${Environment}
+      Roles:
+        - !Ref LambdaExecutionRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ClueNestTableAccess
+            Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:Query
+              - dynamodb:PutItem
+              - dynamodb:DeleteItem
+            Resource: !GetAtt ClueNestTable.Arn
+
+  # Amazon Bedrock permission for the troubleshooting function (POST /troubleshoot).
+  #   bedrock:InvokeModel   needed by the Converse API (the code does not stream, so
+  #                         InvokeModelWithResponseStream is NOT granted)
+  # Resources: only the model in BedrockModelId. For an inference profile that is the
+  # profile itself plus its underlying foundation model (Bedrock checks both; the Region is
+  # a wildcard because a cross-Region profile may run the model in several Regions).
+  # No other model, no model management or other Bedrock actions. All ClueNest functions
+  # share LambdaExecutionRole, so this permission technically applies to the role, but only
+  # TroubleshootFunction has code that calls Bedrock.
+  BedrockInvokePolicy:
+    Type: AWS::IAM::Policy
+    Condition: HasBedrockModel
+    Properties:
+      PolicyName: !Sub ClueNestLambdaBedrockInvoke-${Environment}
+      Roles:
+        - !Ref LambdaExecutionRole
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: InvokeSelectedModelOnly
+            Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+            Resource: !If
+              - UsesInferenceProfile
+              - - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${BedrockModelId}
+                - !Sub arn:${AWS::Partition}:bedrock:*::foundation-model/${BedrockBaseModelId}
+              - - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}
+  # ===========================================================================
+  # 4. DYNAMODB RESOURCES
+  # ===========================================================================
+
+  # One table for all ClueNest AI data.
+  #   PK = USER#<Cognito sub>               (every item of one user shares this value)
+  #   SK = <TYPE>#<id>                      (APPLIANCE#, TROUBLESHOOT#, MAINTENANCE#, REPAIR#, QUOTE#)
+  # See backend/README.md for the full key patterns and access patterns.
+  ClueNestTable:
+    Type: AWS::DynamoDB::Table
+    # prod keeps the table if the stack is deleted or the resource is replaced.
+    # dev and test delete it with the stack, so no tables are left behind.
+    DeletionPolicy: !If [IsProd, Retain, Delete]
+    UpdateReplacePolicy: !If [IsProd, Retain, Delete]
+    Properties:
+      TableName: !Sub ClueNestTable-${Environment}
+      BillingMode: PAY_PER_REQUEST
+
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+
+      # Encryption at rest with the AWS managed key (alias/aws/dynamodb).
+      # No key to manage and no extra IAM permissions are needed by callers.
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+
+      # Notification ledger items (SK = NOTIFY#...) carry n_expiresAt (seconds since 1970) and are deleted by DynamoDB
+      # about a year after they are written. No other item has this attribute, so nothing else expires.
+      TimeToLiveSpecification:
+        AttributeName: n_expiresAt
+        Enabled: true
+      # Continuous backups (restore to any second in the last 35 days): prod only.
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [IsProd, true, false]
+
+      # prod: the table cannot be deleted until protection is switched off first.
+      DeletionProtectionEnabled: !If [IsProd, true, false]
+
+      Tags:
+        - Key: Project
+          Value: ClueNestAI
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # ===========================================================================
+  # 5. LAMBDA RESOURCES
+  # All functions load the same zip (LambdaCodeBucket / LambdaCodeKey) and differ only in
+  # their Handler. They all run as LambdaExecutionRole. They are called only through the
+  # API Gateway routes in section 7. DependsOn the policy so the permissions exist
+  # before a function does (this also gives the new role time to propagate).
+  # ===========================================================================
+
+  # GET/POST /appliances, GET/PUT/DELETE /appliances/{id}
+  AppliancesFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: LambdaDynamoDBPolicy
+    Properties:
+      FunctionName: !Sub ClueNestAppliances-${Environment}
+      Description: Create, list, read, update and delete the signed-in user's appliances.
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      Handler: appliances.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+      MemorySize: 256
+      Timeout: 10
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref ClueNestTable
+      Tags:
+        - Key: Project
+          Value: ClueNestAI
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # POST /troubleshoot. Safety rules first, then Amazon Bedrock (Converse API) for the guidance.
+  TroubleshootFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: LambdaDynamoDBPolicy
+    Properties:
+      FunctionName: !Sub ClueNestTroubleshoot-${Environment}
+      Description: AI appliance troubleshooting. Validates the request, applies safety rules, then asks Amazon Bedrock.
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      Handler: troubleshoot.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+      MemorySize: 256
+      # HTTP API stops waiting at 30 s. The model call gets 20 s and is not retried.
+      Timeout: !If [HasBedrockModel, 28, 10]
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref ClueNestTable
+          BEDROCK_MODEL_ID: !If [HasBedrockModel, !Ref BedrockModelId, !Ref "AWS::NoValue"]
+      Tags:
+        - Key: Project
+          Value: ClueNestAI
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # GET/POST /maintenance, GET/PUT/DELETE /maintenance/{id}, POST /maintenance/{id}/complete
+  MaintenanceFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: LambdaDynamoDBPolicy
+    Properties:
+      FunctionName: !Sub ClueNestMaintenance-${Environment}
+      Description: Maintenance reminders for the signed-in user, including repeats and marking complete.
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      Handler: maintenance.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+      MemorySize: 256
+      Timeout: 10
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref ClueNestTable
+      Tags:
+        - Key: Project
+          Value: ClueNestAI
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # GET/POST /repair-history, GET/PUT/DELETE /repair-history/{id}
+  RepairHistoryFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: LambdaDynamoDBPolicy
+    Properties:
+      FunctionName: !Sub ClueNestRepairHistory-${Environment}
+      Description: Repair records for the signed-in user.
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      Handler: repair_history.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+      MemorySize: 256
+      Timeout: 10
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref ClueNestTable
+      Tags:
+        - Key: Project
+          Value: ClueNestAI
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # ---------------------------------------------------------------------------
+  # Secrets Manager: the Google Places API key (used by TechnicianSearchFunction).
+  # This creates the empty secret CONTAINER only. No key is in this template, in the code,
+  # in a parameter, in an environment variable or in an output. Enter the real key after
+  # deployment (see "Secrets Manager section" in backend/README.md). CloudFormation never
+  # writes or changes the value, so later stack updates do not overwrite it.
+  # Encryption: the AWS managed key alias/aws/secretsmanager (default). Roles in the same
+  # account need no separate kms:Decrypt permission for it, so none is granted.
+  # Deleting the stack schedules the dev/test secret for deletion (30-day recovery window,
+  # during which the name cannot be reused). prod keeps the secret.
+  # ---------------------------------------------------------------------------
+  GooglePlacesSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: !If [IsProd, Retain, Delete]
+    UpdateReplacePolicy: !If [IsProd, Retain, Delete]
+    Properties:
+      Name: !Sub cluenest/google-places/${Environment}
+      Description: !Sub Google Places API key for ClueNest AI technician search (${Environment}). Value is entered by hand after deployment.
+      Tags:
+        - Key: Project
+          Value: ClueNestAI
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+  # A separate role for TechnicianSearchFunction, so that ONLY this function can read the
+  # secret. The shared LambdaExecutionRole has no Secrets Manager permission. This function
+  # does not use the database, so this role has no DynamoDB access either.
+  TechnicianSearchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ClueNestTechnicianSearchRole-${Environment}
+      Description: !Sub Execution role for the ClueNest technician search function (${Environment}). CloudWatch Logs plus read access to the Google Places secret only.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowLambdaServiceToAssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub ClueNestReadGooglePlacesSecret-${Environment}
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadGooglePlacesSecretOnly
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref GooglePlacesSecret
+      Tags:
+        - Key: Project
+          Value: ClueNestAI
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+  # GET <technician search path>. Reads the Google Places key from Secrets Manager and searches Google
+  # Places (New) over HTTPS. It does not use the database. Timeout 25 s: up to two Google calls of 7 s
+  # each, plus a possible slow secret read. HTTP API stops waiting at 30 s.
+  TechnicianSearchFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ClueNestTechnicianSearch-${Environment}
+      Description: Technician search. Reads the Google Places key from Secrets Manager and returns appliance repair businesses from Google Places.
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      Handler: technician_search.handler
+      Role: !GetAtt TechnicianSearchRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+      MemorySize: 128
+      Timeout: 25
+      Environment:
+        Variables:
+          GOOGLE_PLACES_SECRET_ARN: !Ref GooglePlacesSecret
+      Tags:
+        - Key: Project
+          Value: ClueNestAI
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # ===========================================================================
+  # 6. COGNITO RESOURCES
+  # Sign-up, sign-in, email verification and password reset for ClueNest AI users.
+  # Only Cognito's own user directory is used: no social or other identity providers.
+  # The browser app has no secret. Passwords are handled only by Cognito and are never
+  # stored in DynamoDB or logged by the Lambda functions.
+  # ===========================================================================
+
+  # The user directory. Its "sub" claim is the UserId used in DynamoDB keys (USER#<sub>).
+  # Deleting a pool deletes all its users, so prod keeps it (DeletionPolicy) and is
+  # protected against deletion. Changing the Schema later replaces the pool (all users
+  # are lost), so decide the attributes before real users sign up.
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: !If [IsProd, Retain, Delete]
+    UpdateReplacePolicy: !If [IsProd, Retain, Delete]
+    Properties:
+      UserPoolName: !Sub ClueNestUsers-${Environment}
+      DeletionProtection: !If [IsProd, ACTIVE, INACTIVE]
+
+      # Users sign in with their email address, which is not case sensitive.
+      UsernameAttributes:
+        - email
+      UsernameConfiguration:
+        CaseSensitive: false
+
+      # Cognito emails a verification code at sign-up. An email is "verified" only after
+      # the user enters it, and password reset only works for verified emails.
+      AutoVerifiedAttributes:
+        - email
+
+      # Self-service sign-up: users register themselves, with no administrator involved.
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          TemporaryPasswordValidityDays: 3
+
+      # Attributes collected at sign-up. The frontend reads the email and the first name
+      # (given_name) from the ID token, for the account details and the welcome message.
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: given_name
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+
+      # A changed email address only takes effect after the new address is verified.
+      UserAttributeUpdateSettings:
+        AttributesRequireVerificationBeforeUpdate:
+          - email
+
+      # "Forgot password" works through the verified email address only (no phone/SMS).
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+
+      # Cognito's built-in email sender. It is limited to about 50 emails per day, which is
+      # fine for development. Before real users arrive, switch to Amazon SES (its own step).
+      EmailConfiguration:
+        EmailSendingAccount: COGNITO_DEFAULT
+      VerificationMessageTemplate:
+        DefaultEmailOption: CONFIRM_WITH_CODE
+        EmailSubject: Your ClueNest AI verification code
+        EmailMessage: "Your ClueNest AI verification code is {####}."
+
+      # Multi-factor authentication is not enabled (default). Text-message MFA would need
+      # SNS and an extra IAM role, and optional MFA needs frontend support.
+
+      UserPoolTags:
+        Project: ClueNestAI
+        Environment: !Ref Environment
+        ManagedBy: CloudFormation
+
+  # The scopes that API Gateway requires on every route. Cognito puts a scope in an ACCESS token only
+  # when the sign-in asked for it and the app client allows it, and never puts one in an ID token.
+  # That is how the API tells the two token types apart (an HTTP API JWT authorizer cannot otherwise:
+  # an ID token for this client passes the issuer, audience and expiry checks, just like an access token).
+  #   cluenest-api/read    GET routes: list and read the user's data, technician search
+  #   cluenest-api/write   POST, PUT and DELETE routes: change the user's data, AI troubleshooting
+  # Only tokens from the hosted sign-in (authorization code flow) carry them. Tokens from a direct
+  # password (SRP) sign-in do not, and are refused with 403.
+  UserPoolResourceServer:
+    Type: AWS::Cognito::UserPoolResourceServer
+    Properties:
+      UserPoolId: !Ref UserPool
+      Identifier: cluenest-api
+      Name: ClueNest API
+      Scopes:
+        - ScopeName: read
+          ScopeDescription: Read your own ClueNest data and search for technicians
+        - ScopeName: write
+          ScopeDescription: Create, change and delete your own ClueNest data and use AI troubleshooting
+  # The app client for the browser application. Public client: it has no secret, because
+  # anything in browser code can be read. Sign-in uses the authorization code flow (the
+  # frontend plans Hosted UI with PKCE), and tokens are never returned in the URL.
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: UserPoolResourceServer
+    Properties:
+      ClientName: !Sub ClueNestWebClient-${Environment}
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+
+      # Direct sign-in flows: SRP (the password never leaves the browser in clear text) and
+      # refresh tokens. No plain-password flow and no custom auth.
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+      # Cognito's own user directory only. No Google, Facebook or other federation.
+      SupportedIdentityProviders:
+        - COGNITO
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - openid
+        - email
+        - profile
+        - cluenest-api/read
+        - cluenest-api/write
+      # The local development address (parameters) plus the CloudFront https address of the hosted
+      # frontend (section 7B). Cognito requires exact matches, so nothing is wildcarded.
+      CallbackURLs:
+        - !Ref FrontendCallbackUrl
+        - !Sub https://${FrontendDistribution.DomainName}/
+      LogoutURLs:
+        - !Ref FrontendLogoutUrl
+        - !Sub https://${FrontendDistribution.DomainName}/
+      # Sign-in errors do not reveal whether an email address has an account.
+      PreventUserExistenceErrors: ENABLED
+      # Signing out can revoke the refresh token.
+      EnableTokenRevocation: true
+
+      # Short-lived tokens: the API checks the access token (and its scope) on every call.
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 7
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+
+      # The only user attributes the app can read or change. Everything the frontend shows
+      # is listed. email_verified is readable but cannot be changed by the user.
+      ReadAttributes:
+        - email
+        - email_verified
+        - given_name
+        - family_name
+        - name
+      WriteAttributes:
+        - email
+        - given_name
+        - family_name
+        - name
+
+  # The sign-in domain. It serves the Cognito sign-in, sign-up, e-mail confirmation and
+  # sign-out pages and the token endpoint. A Cognito-managed prefix is used, so no custom domain
+  # or certificate is bought. ManagedLoginVersion 1 is the classic hosted UI, which works without
+  # extra branding resources and supports /oauth2/authorize, /signup, /oauth2/token and /logout.
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub ${CognitoDomainPrefix}-${Environment}
+      UserPoolId: !Ref UserPool
+      ManagedLoginVersion: 1
+  # ===========================================================================
+  # 7. API GATEWAY RESOURCES
+  # One HTTP API, reached over HTTPS only. EVERY route requires a valid Cognito token,
+  # there are no public routes and no catch-all route, so any other request gets 404.
+  # API Gateway checks the token, then passes the verified claims to the Lambda
+  # function, which takes the user id (sub) from them. Base URL: see ApiBaseUrl.
+  # Routes exist only for operations a Lambda function really implements. There are
+  # no routes for warranty checking or repair-vs-replace (the browser calculates both)
+  # or for technician quotes (no function yet).
+  # ===========================================================================
+
+  # The access log. "/aws/vendedlogs/" is the prefix AWS recommends for service logs:
+  # it needs no log resource policy. Only the log format below is written to it. The
+  # Authorization header and query strings (which can hold a place name) are never logged.
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    # prod keeps its audit log if the stack is deleted. dev and test delete it.
+    DeletionPolicy: !If [IsProd, Retain, Delete]
+    UpdateReplacePolicy: !If [IsProd, Retain, Delete]
+    Properties:
+      LogGroupName: !Sub /aws/vendedlogs/apigateway/ClueNestApi-${Environment}
+      RetentionInDays: !If [IsProd, 90, 30]
+      Tags:
+        - Key: Project
+          Value: ClueNestAI
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub ClueNestApi-${Environment}
+      Description: !Sub ClueNest AI HTTP API (${Environment}). Every route requires a Cognito token.
+      ProtocolType: HTTP
+      # CORS: only the website's own origins may call the API from a browser: the origin of
+      # FrontendCallbackUrl (https://host[:port], without the path) and the CloudFront site.
+      # No wildcard, and no cookies are allowed.
+      # The frontend sends the Authorization and Content-Type headers, which is why the
+      # browser first asks permission with a preflight (OPTIONS) request. API Gateway
+      # answers that itself, without a token.
+      CorsConfiguration:
+        AllowOrigins:
+          - !Sub
+            - "${Scheme}//${Host}"
+            - Scheme: !Select [0, !Split ["/", !Ref FrontendCallbackUrl]]
+              Host: !Select [2, !Split ["/", !Ref FrontendCallbackUrl]]
+          - !Sub https://${FrontendDistribution.DomainName}
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+        AllowHeaders:
+          - authorization
+          - content-type
+        MaxAge: 3600
+      Tags:
+        Project: ClueNestAI
+        Environment: !Ref Environment
+        ManagedBy: CloudFormation
+
+  # Checks the Cognito token on every request: signature (the pool's published keys),
+  # issuer, audience (our app client), and expiry. On its own this accepts ID tokens as well as access
+  # tokens, because both name this app client (there is no standard way to tell them apart). Each route
+  # therefore also requires a scope (AuthorizationScopes), which only access tokens carry, so an ID token
+  # is refused with 403. Requests without a valid token get 401. Neither reaches Lambda.
+  JwtAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      AuthorizerType: JWT
+      Name: !Sub ClueNestCognitoJwt-${Environment}
+      IdentitySource:
+        - $request.header.Authorization
+      JwtConfiguration:
+        Issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}
+        Audience:
+          - !Ref UserPoolClient
+
+  # --- Integrations: one per Lambda function. Payload format 2.0 is what the code expects. ---
+  AppliancesIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt AppliancesFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  MaintenanceIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt MaintenanceFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  RepairHistoryIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt RepairHistoryFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  TroubleshootIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt TroubleshootFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  TechnicianSearchIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt TechnicianSearchFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  # --- Routes: every one uses the JWT authorizer. The path parameter is always named "id". ---
+  AppliancesListRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /appliances
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - cluenest-api/read
+      Target: !Sub integrations/${AppliancesIntegration}
+
+  AppliancesCreateRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /appliances
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - cluenest-api/write
+      Target: !Sub integrations/${AppliancesIntegration}
+
+  AppliancesGetRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /appliances/{id}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - cluenest-api/read
+      Target: !Sub integrations/${AppliancesIntegration}
+
+  AppliancesUpdateRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PUT /appliances/{id}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - cluenest-api/write
+      Target: !Sub integrations/${AppliancesIntegration}
+
+  AppliancesDeleteRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /appliances/{id}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - cluenest-api/write
+      Target: !Sub integrations/${AppliancesIntegration}
+
+  MaintenanceListRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /maintenance
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - cluenest-api/read
+      Target: !Sub integrations/${MaintenanceIntegration}
+
+  MaintenanceCreateRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /maintenance
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - cluenest-api/write
+      Target: !Sub integrations/${MaintenanceIntegration}
+
+  MaintenanceGetRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /maintenance/{id}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - cluenest-api/read
+      Target: !Sub integrations/${MaintenanceIntegration}
+
+  MaintenanceUpdateRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PUT /maintenance/{id}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - cluenest-api/write
+      Target: !Sub integrations/${MaintenanceIntegration}
+
+  MaintenanceDeleteRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /maintenance/{id}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - cluenest-api/write
+      Target: !Sub integrations/${MaintenanceIntegration}
+
+  MaintenanceCompleteRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /maintenance/{id}/complete
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - cluenest-api/write
+      Target: !Sub integrations/${MaintenanceIntegration}
+
+  RepairHistoryListRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /repair-history
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - cluenest-api/read
+      Target: !Sub integrations/${RepairHistoryIntegration}
+
+  RepairHistoryCreateRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /repair-history
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - cluenest-api/write
+      Target: !Sub integrations/${RepairHistoryIntegration}
+
+  RepairHistoryGetRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /repair-history/{id}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - cluenest-api/read
+      Target: !Sub integrations/${RepairHistoryIntegration}
+
+  RepairHistoryUpdateRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PUT /repair-history/{id}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - cluenest-api/write
+      Target: !Sub integrations/${RepairHistoryIntegration}
+
+  RepairHistoryDeleteRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: DELETE /repair-history/{id}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - cluenest-api/write
+      Target: !Sub integrations/${RepairHistoryIntegration}
+
+  TroubleshootRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /troubleshoot
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - cluenest-api/write
+      Target: !Sub integrations/${TroubleshootIntegration}
+
+  # The path matches technicianSearchPath in frontend/js/config.js.
+  TechnicianSearchRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /technicians/search
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - cluenest-api/read
+      Target: !Sub integrations/${TechnicianSearchIntegration}
+
+  # The stage is named after the environment (dev, test, prod), so URLs end in /dev etc.
+  # AutoDeploy publishes route changes automatically. The DependsOn makes the very first
+  # deployment wait for every route, so the API is complete when the stack finishes.
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    DependsOn:
+      - AppliancesListRoute
+      - AppliancesCreateRoute
+      - AppliancesGetRoute
+      - AppliancesUpdateRoute
+      - AppliancesDeleteRoute
+      - MaintenanceListRoute
+      - MaintenanceCreateRoute
+      - MaintenanceGetRoute
+      - MaintenanceUpdateRoute
+      - MaintenanceDeleteRoute
+      - MaintenanceCompleteRoute
+      - RepairHistoryListRoute
+      - RepairHistoryCreateRoute
+      - RepairHistoryGetRoute
+      - RepairHistoryUpdateRoute
+      - RepairHistoryDeleteRoute
+      - TroubleshootRoute
+      - TechnicianSearchRoute
+      - NotificationPreferencesGetRoute
+      - NotificationPreferencesPutRoute
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: !Ref Environment
+      Description: !Sub ClueNest AI API, ${Environment} stage.
+      AutoDeploy: true
+      # Per-route limits: 20 requests per second on average, with bursts up to 40.
+      DefaultRouteSettings:
+        ThrottlingRateLimit: 20
+        ThrottlingBurstLimit: 40
+      # One JSON line per request. Contains no tokens, no request or response bodies and no
+      # query strings. "sub" is the signed-in user's id and "ip" is the caller's address,
+      # both kept for security investigations. They are deleted with the log retention.
+      # API Gateway does NOT escape text it inserts into this line. $context.authorizer.error
+      # was removed because its text for a forged token contains double quotes, which broke the
+      # JSON. Do not add that field back. "error" and "integrationError" have only ever held
+      # quote-free text, but a line that fails to parse should be checked for those two fields.
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiAccessLogGroup.Arn
+        Format: '{"requestId":"$context.requestId","requestTime":"$context.requestTime","ip":"$context.identity.sourceIp","method":"$context.httpMethod","routeKey":"$context.routeKey","status":"$context.status","responseLength":"$context.responseLength","latencyMs":"$context.responseLatency","integrationStatus":"$context.integrationStatus","integrationError":"$context.integrationErrorMessage","error":"$context.error.message","sub":"$context.authorizer.claims.sub"}'
+      Tags:
+        Project: ClueNestAI
+        Environment: !Ref Environment
+        ManagedBy: CloudFormation
+
+  # --- Permission for API Gateway to invoke each function. ---
+  # Each one allows only THIS API and THIS stage, and only the paths that function serves.
+  # The trailing * matches both /appliances and /appliances/<id>. Nothing else can invoke
+  # these functions through API Gateway.
+  AppliancesInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref AppliancesFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/${Environment}/*/appliances*
+
+  MaintenanceInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref MaintenanceFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/${Environment}/*/maintenance*
+
+  RepairHistoryInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref RepairHistoryFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/${Environment}/*/repair-history*
+
+  TroubleshootInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref TroubleshootFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/${Environment}/POST/troubleshoot
+
+  TechnicianSearchInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref TechnicianSearchFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/${Environment}/GET/technicians/search
+
+  # ===========================================================================
+  # 7B. FRONTEND HOSTING (S3 + CloudFront)
+  # The static frontend (frontend/index.html and its css and js folders) is served over https by
+  # CloudFront from a PRIVATE bucket. Only this distribution may read the bucket (Origin Access
+  # Control). The files are uploaded separately (see "Frontend hosting section" in backend/README.md).
+  # The site uses hash routes (#/appliances), so a refresh or a pasted link always requests "/".
+  # ===========================================================================
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    # prod keeps the files if the stack is deleted. dev and test delete the bucket with the stack,
+    # which only works while it is empty (empty it first).
+    DeletionPolicy: !If [IsProd, Retain, Delete]
+    UpdateReplacePolicy: !If [IsProd, Retain, Delete]
+    Properties:
+      BucketName: !Sub cluenest-frontend-${Environment}-${AWS::AccountId}
+      # No public access of any kind, and no website hosting.
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      # ACLs are disabled: the bucket owner owns every object.
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      # Versioning lets a bad upload be rolled back. Old versions are deleted after 30 days.
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: Project
+          Value: ClueNestAI
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+  # Who may read the bucket: this one CloudFront distribution (GetObject only, so a missing file
+  # answers 403, never a file list), and nobody over plain http.
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowReadFromThisCloudFrontDistributionOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub ${FrontendBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}
+          - Sid: DenyPlainHttp
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt FrontendBucket.Arn
+              - !Sub ${FrontendBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+  # CloudFront signs its requests to S3 (SigV4), which is what the bucket policy above relies on.
+  FrontendOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub ClueNestFrontendOAC-${Environment}
+        Description: Lets the ClueNest frontend distribution read the private frontend bucket
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+  # The files have no version number in their names, so they are cached for 5 minutes by default
+  # (longer only when an object sets its own Cache-Control, up to 1 day). Query strings, cookies and
+  # headers are not part of the cache key, so the sign-in return (/?code=...) is served from cache and
+  # the code is never sent to S3. Compression is on.
+  FrontendCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub ClueNestFrontend-${Environment}
+        Comment: Static frontend files, 5 minute default
+        MinTTL: 0
+        DefaultTTL: 300
+        MaxTTL: 86400
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: true
+          EnableAcceptEncodingBrotli: true
+          HeadersConfig:
+            HeaderBehavior: none
+          CookiesConfig:
+            CookieBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+  # PriceClass_100 serves from North America and Europe only (the cheapest). The default
+  # *.cloudfront.net certificate is used, so no domain name or certificate is needed.
+  # ResponseHeadersPolicyId is AWS's managed "SecurityHeadersPolicy" (HSTS, nosniff, frame deny,
+  # referrer policy). A missing file (403 or 404 from the private bucket) answers index.html, so a
+  # typed address that is not a file still opens the app (which then shows the dashboard).
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: !Sub ClueNest AI frontend (${Environment})
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: FrontendBucketOrigin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt FrontendOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: FrontendBucketOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          CachePolicyId: !Ref FrontendCachePolicy
+          ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 10
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 10
+      Tags:
+        - Key: Project
+          Value: ClueNestAI
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation  # ===========================================================================
+  # 7C. SCHEDULED MAINTENANCE REMINDER CHECK (EventBridge)
+  # Once a day an EventBridge rule starts MaintenanceReminderFunction. It counts the pending
+  # reminders that are due today or overdue and logs the totals. It sends nothing yet: the stack has
+  # no notification service (SNS or SES comes in a later step), and the user's e-mail address is in
+  # Cognito, not DynamoDB.
+  # Why a new function instead of MaintenanceFunction: that function answers API Gateway requests for
+  # ONE signed-in user, so its handler needs a user and its role may only read that user's items. The
+  # daily check must look at EVERY user's items, which needs dynamodb:Scan. Adding Scan to the shared
+  # LambdaExecutionRole would give every API function the power to read the whole table, so the check
+  # has its own function and its own role, and the reminder code of maintenance.py is untouched.
+  # ===========================================================================
+  # Only this function may read the whole table, and it reads nothing more than that. It may also write its own
+  # notification ledger and publish to the per-user reminder topics (section 7D).
+  MaintenanceReminderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ClueNestMaintenanceReminderRole-${Environment}
+      Description: !Sub Execution role for the daily maintenance reminder check (${Environment}). CloudWatch Logs plus a read-only Scan of the ClueNest table.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowLambdaServiceToAssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub ClueNestScanReminderTable-${Environment}
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ScanTheClueNestTableReadOnly
+                Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                Resource: !GetAtt ClueNestTable.Arn
+              # The notification ledger and the opt-in setting. Only these attributes may be named in a request
+              # (n_* are the ledger's, p_maintenanceEmail is the user's opt-in), and reads must list the attributes
+              # they want. The role can therefore never change a reminder, and cannot read other attributes with Get or Query.
+              - Sid: LedgerAndOptInOnly
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt ClueNestTable.Arn
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:Attributes:
+                      - PK
+                      - SK
+                      - p_maintenanceEmail
+                      - n_state
+                      - n_attempts
+                      - n_leaseUntil
+                      - n_nextAttemptAt
+                      - n_sentAt
+                      - n_messageId
+                      - n_errorCode
+                      - n_type
+                      - n_userId
+                      - n_reminderId
+                      - n_dueDate
+                      - n_expiresAt
+                  StringEqualsIfExists:
+                    dynamodb:Select: SPECIFIC_ATTRIBUTES
+              # Publish, and check that the address is confirmed, on the per-user topics only. No create, subscribe or delete.
+              - Sid: PublishToPerUserTopicsOnly
+                Effect: Allow
+                Action:
+                  - sns:Publish
+                  - sns:ListSubscriptionsByTopic
+                Resource: !Sub arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:ClueNestReminders-${Environment}-*
+      Tags:
+        - Key: Project
+          Value: ClueNestAI
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+  # Created here (instead of by Lambda on the first call) so the log is kept for a limited time.
+  MaintenanceReminderLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: !If [IsProd, Retain, Delete]
+    UpdateReplacePolicy: !If [IsProd, Retain, Delete]
+    Properties:
+      LogGroupName: !Sub /aws/lambda/ClueNestMaintenanceReminders-${Environment}
+      RetentionInDays: !If [IsProd, 90, 30]
+      Tags:
+        - Key: Project
+          Value: ClueNestAI
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+  # Same zip and runtime as the other functions. Not behind API Gateway: only EventBridge may call it.
+  MaintenanceReminderFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: MaintenanceReminderLogGroup
+    Properties:
+      FunctionName: !Sub ClueNestMaintenanceReminders-${Environment}
+      Description: Daily check for maintenance reminders that are due or overdue, and the e-mail to users who opted in and confirmed (Amazon SNS). Started by EventBridge.
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      Handler: maintenance_reminders.handler
+      Role: !GetAtt MaintenanceReminderRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+      MemorySize: 256
+      Timeout: 300
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref ClueNestTable
+          # Per-user topics are named <prefix><user id>. Delivery is switched on by this variable.
+          TOPIC_ARN_PREFIX: !Sub arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:ClueNestReminders-${Environment}-
+          APP_URL: !Sub https://${FrontendDistribution.DomainName}/
+      Tags:
+        - Key: Project
+          Value: ClueNestAI
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+  # 12:00 UTC every day (7 or 8 a.m. in Toronto). Cron fields: minute hour day-of-month month day-of-week year.
+  # A failed start is retried twice within an hour, then dropped.
+  MaintenanceReminderRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ClueNestMaintenanceReminders-${Environment}
+      Description: Starts the daily maintenance reminder check
+      ScheduleExpression: cron(0 12 * * ? *)
+      State: ENABLED
+      Targets:
+        - Id: MaintenanceReminderFunction
+          Arn: !GetAtt MaintenanceReminderFunction.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+            MaximumEventAgeInSeconds: 3600
+  # Only this one rule may start the function (not any EventBridge rule, and not another account).
+  MaintenanceReminderInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MaintenanceReminderFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt MaintenanceReminderRule.Arn  # ===========================================================================
+  # 7D. MAINTENANCE REMINDER E-MAIL SETTING (Amazon SNS)
+  # Each user who turns the setting on gets THEIR OWN SNS topic, ClueNestReminders-<env>-<user id>, with
+  # only their own verified Cognito e-mail address subscribed to it. SNS e-mails that address a
+  # confirmation link, and nothing is delivered until it is clicked. A message published to one user's topic
+  # can reach nobody else, so no filter policy is needed and nothing is ever sent to a shared topic.
+  # The topics are created and deleted by NotificationPreferencesFunction when users switch the setting
+  # on and off, so they are not CloudFormation resources. Deleting the stack does not delete them.
+  # The setting itself is one DynamoDB item per user (SK = PREFS#notifications, attributes p_*).
+  # The daily check (section 7C) sends the e-mail.
+  # ===========================================================================
+  # Can create, subscribe to and delete ONLY the per-user reminder topics, read ONLY a user's own e-mail
+  # address from Cognito, and read or write ONLY the p_* attributes of the setting item.
+  NotificationPreferencesRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ClueNestNotificationPreferencesRole-${Environment}
+      Description: !Sub Execution role for the notification setting function (${Environment}). Per-user SNS topics, one Cognito read and the setting item only.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowLambdaServiceToAssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub ClueNestNotificationPreferences-${Environment}
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: SettingItemAttributesOnly
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt ClueNestTable.Arn
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:Attributes:
+                      - PK
+                      - SK
+                      - p_type
+                      - p_userId
+                      - p_maintenanceEmail
+                      - p_updatedAt
+                      - p_requestedAt
+                      - p_lastSubscribeAt
+                  StringEqualsIfExists:
+                    dynamodb:Select: SPECIFIC_ATTRIBUTES
+              - Sid: PerUserReminderTopicsOnly
+                Effect: Allow
+                Action:
+                  - sns:CreateTopic
+                  - sns:SetTopicAttributes
+                  - sns:Subscribe
+                  - sns:ListSubscriptionsByTopic
+                  - sns:DeleteTopic
+                Resource: !Sub arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:ClueNestReminders-${Environment}-*
+              - Sid: ReadOneUsersVerifiedEmail
+                Effect: Allow
+                Action:
+                  - cognito-idp:AdminGetUser
+                Resource: !GetAtt UserPool.Arn
+      Tags:
+        - Key: Project
+          Value: ClueNestAI
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+  NotificationPreferencesLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: !If [IsProd, Retain, Delete]
+    UpdateReplacePolicy: !If [IsProd, Retain, Delete]
+    Properties:
+      LogGroupName: !Sub /aws/lambda/ClueNestNotificationPreferences-${Environment}
+      RetentionInDays: !If [IsProd, 90, 30]
+      Tags:
+        - Key: Project
+          Value: ClueNestAI
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+  # GET and PUT /notifications/preferences, behind the same Cognito authorizer and scopes as every route.
+  NotificationPreferencesFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: NotificationPreferencesLogGroup
+    Properties:
+      FunctionName: !Sub ClueNestNotificationPreferences-${Environment}
+      Description: Reads and changes the signed-in user's maintenance reminder e-mail setting and manages their own Amazon SNS topic.
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      Handler: notification_preferences.handler
+      Role: !GetAtt NotificationPreferencesRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+      MemorySize: 128
+      Timeout: 15
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref ClueNestTable
+          USER_POOL_ID: !Ref UserPool
+          TOPIC_ARN_PREFIX: !Sub arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:ClueNestReminders-${Environment}-
+      Tags:
+        - Key: Project
+          Value: ClueNestAI
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+  NotificationPreferencesIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt NotificationPreferencesFunction.Arn
+      PayloadFormatVersion: "2.0"
+  NotificationPreferencesGetRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /notifications/preferences
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - cluenest-api/read
+      Target: !Sub integrations/${NotificationPreferencesIntegration}
+  NotificationPreferencesPutRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: PUT /notifications/preferences
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      AuthorizationScopes:
+        - cluenest-api/write
+      Target: !Sub integrations/${NotificationPreferencesIntegration}
+  NotificationPreferencesInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref NotificationPreferencesFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/${Environment}/*/notifications/preferences  # ===========================================================================
+  # FUTURE SECTIONS (none of these exist yet)
+  # Add each new service to THIS file, in its own banner like the ones above,
+  # one service at a time: S3, CloudWatch. See backend/README.md.
+  # ===========================================================================
+
+# =============================================================================
+# 8. OUTPUTS
+# =============================================================================
+Outputs:
+  # --- IAM ---
+  LambdaExecutionRoleArn:
+    Description: ARN of the Lambda execution role. Use it as the Role of ClueNest AI Lambda functions.
+    Value: !GetAtt LambdaExecutionRole.Arn
+
+  LambdaExecutionRoleName:
+    Description: Name of the Lambda execution role.
+    Value: !Ref LambdaExecutionRole
+
+  # --- DynamoDB ---
+  TableName:
+    Description: Name of the ClueNest AI DynamoDB table.
+    Value: !Ref ClueNestTable
+
+  TableArn:
+    Description: ARN of the ClueNest AI DynamoDB table. Use it to scope Lambda permissions to this table.
+    Value: !GetAtt ClueNestTable.Arn
+
+  # --- Lambda ---
+  AppliancesFunctionArn:
+    Description: ARN of the appliances Lambda function.
+    Value: !GetAtt AppliancesFunction.Arn
+
+  TroubleshootFunctionArn:
+    Description: ARN of the troubleshooting Lambda function.
+    Value: !GetAtt TroubleshootFunction.Arn
+
+  MaintenanceFunctionArn:
+    Description: ARN of the maintenance reminders Lambda function.
+    Value: !GetAtt MaintenanceFunction.Arn
+
+  RepairHistoryFunctionArn:
+    Description: ARN of the repair history Lambda function.
+    Value: !GetAtt RepairHistoryFunction.Arn
+
+  TechnicianSearchFunctionArn:
+    Description: ARN of the technician search Lambda function (placeholder until Google Places is added).
+    Value: !GetAtt TechnicianSearchFunction.Arn
+
+  # --- Cognito ---
+  UserPoolId:
+    Description: ID of the Cognito user pool. Goes in cognito.userPoolId in frontend/js/config.js.
+    Value: !Ref UserPool
+
+  UserPoolArn:
+    Description: ARN of the Cognito user pool.
+    Value: !GetAtt UserPool.Arn
+
+  UserPoolClientId:
+    Description: ID of the browser app client. Goes in cognito.clientId in frontend/js/config.js. It is not a secret.
+    Value: !Ref UserPoolClient
+
+  CognitoHostedUiDomain:
+    Description: Host name of the sign-in domain, without https://. Goes in cognito.hostedUiDomain in frontend/js/config.js. It is not a secret.
+    Value: !Sub ${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com
+  CognitoIssuerUrl:
+    Description: Issuer URL of the user pool. API Gateway's JWT authorizer and token checks use it.
+    Value: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}
+
+  # --- API Gateway ---
+  ApiId:
+    Description: ID of the HTTP API.
+    Value: !Ref HttpApi
+
+  ApiBaseUrl:
+    Description: Base URL of the API, including the stage. Goes in apiBaseUrl in frontend/js/config.js, with no trailing slash.
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${ApiStage}
+
+  CorsAllowedOrigin:
+    Description: The only website origin allowed to call the API from a browser. It comes from FrontendCallbackUrl.
+    Value: !Sub
+      - "${Scheme}//${Host}"
+      - Scheme: !Select [0, !Split ["/", !Ref FrontendCallbackUrl]]
+        Host: !Select [2, !Split ["/", !Ref FrontendCallbackUrl]]
+
+  ApiAccessLogGroupName:
+    Description: CloudWatch log group that holds the API access log.
+    Value: !Ref ApiAccessLogGroup
+  # --- Amazon Bedrock ---
+  BedrockModelIdInUse:
+    Condition: HasBedrockModel
+    Description: The Bedrock model ID or inference profile ID the troubleshooting function calls.
+    Value: !Ref BedrockModelId
+  # --- Secrets Manager ---
+  GooglePlacesSecretArn:
+    Description: ARN of the (initially empty) Google Places API key secret. The ARN is not secret. The value is never output.
+    Value: !Ref GooglePlacesSecret
+  GooglePlacesSecretName:
+    Description: Name of the Google Places API key secret.
+    Value: !Sub cluenest/google-places/${Environment}
+  TechnicianSearchRoleArn:
+    Description: ARN of the role used only by the technician search function.
+    Value: !GetAtt TechnicianSearchRole.Arn
+  # --- Frontend hosting ---
+  FrontendBucketName:
+    Description: Private S3 bucket that holds the frontend files. Upload with aws s3 sync (see backend/README.md).
+    Value: !Ref FrontendBucket
+  FrontendDistributionId:
+    Description: ID of the CloudFront distribution. Needed to invalidate the cache after an upload.
+    Value: !Ref FrontendDistribution
+  FrontendUrl:
+    Description: Https address of the hosted frontend. It is registered as a Cognito callback and logout URL and as an API CORS origin.
+    Value: !Sub https://${FrontendDistribution.DomainName}/
+  # --- EventBridge ---
+  MaintenanceReminderFunctionName:
+    Description: Name of the daily maintenance reminder check function. Its log group has the same name with /aws/lambda/ in front.
+    Value: !Ref MaintenanceReminderFunction
+  MaintenanceReminderRuleName:
+    Description: Name of the EventBridge rule that starts the daily check (cron(0 12 * * ? *), 12:00 UTC).
+    Value: !Ref MaintenanceReminderRule
+  NotificationPreferencesFunctionName:
+    Description: Name of the function behind GET and PUT /notifications/preferences. The per-user SNS topics it creates are named ClueNestReminders-<environment>-<user id>.
+    Value: !Ref NotificationPreferencesFunction
