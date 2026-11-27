@@ -173,11 +173,23 @@ function fillTypeFilter() {
     types.map(t => `<option value="${esc(t)}" ${t === state.type ? "selected" : ""}>${esc(t)}</option>`).join("");
 }
 
+// The six action buttons on each appliance card. Every button opens an existing screen for that appliance.
+// "tone" only selects a colour (see .action-* in css/theme.css).
+const CARD_ACTIONS = [
+  { route: "report-problem", label: "Report a Problem", icon: "⚠️", tone: "blue" },
+  { route: "warranty-checker", label: "Warranty Checker", icon: "🛡️", tone: "cyan" },
+  { route: "repair-vs-replace", label: "Repair vs Replace", icon: "⚖️", tone: "purple" },
+  { route: "maintenance-reminder", label: "Maintenance Reminder", icon: "⏰", tone: "green" },
+  { route: "find-technician", label: "Find Technician", icon: "👨‍🔧", tone: "orange" },
+  { route: "repair-history", label: "Repair History", icon: "🔧", tone: "indigo" }
+];
 function cardHtml(a) {
   const status = warrantyStatus(a);
-  const actions = Navigation.ACTIONS.map(act =>
-    `<button class="action" data-route="${act.route}" data-id="${esc(a.id)}">
-       <span>${act.icon}</span>${esc(act.label)}</button>`).join("");
+  const actions = CARD_ACTIONS.map(act =>
+    `<button class="action action-${act.tone}" data-route="${act.route}" data-id="${esc(a.id)}">
+       <span class="action-icon" aria-hidden="true">${act.icon}</span>
+       <span class="action-label">${esc(act.label)}</span>
+       <span class="action-arrow" aria-hidden="true">→</span></button>`).join("");
   return `
     <article class="card">
       <div class="card-head">

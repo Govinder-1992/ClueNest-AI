@@ -149,3 +149,29 @@ body.landing .content > * { animation: none; }
   .lp-grid, .lp-steps { grid-template-columns: 1fr; }
   .lp-nav-actions .btn:not(.btn-primary) { display: none; }
 }
+
+/* ---------- appliance card action buttons ---------- */
+.actions { display: grid; grid-template-columns: 1fr; gap: 10px; border-top: 1px solid var(--border); padding-top: 16px; }
+.action {
+  --t-bg: #eef2ff; --t-fg: #4338ca; --t-edge: #c7d2fe;
+  display: flex; align-items: center; gap: 12px; width: 100%; min-height: 52px; padding: 8px 14px 8px 10px;
+  border: 1px solid transparent; border-radius: 13px; background: var(--t-bg); color: #1c2536;
+  font: inherit; font-size: 14.5px; font-weight: 600; text-align: left; cursor: pointer;
+  box-shadow: 0 1px 3px rgba(30, 27, 75, .08);
+  transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease;
+}
+.action-icon { display: grid; place-items: center; flex-shrink: 0; width: 36px; height: 36px; border-radius: 10px; background: #fff; font-size: 18px; box-shadow: 0 1px 3px rgba(30, 27, 75, .1); }
+.action-label { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.action-arrow { flex-shrink: 0; color: var(--t-fg); font-size: 17px; font-weight: 700; transition: transform .16s ease; }
+.action:hover { background: var(--t-bg); border-color: var(--t-edge); transform: translateY(-2px); box-shadow: 0 8px 18px rgba(30, 27, 75, .14); }
+.action:hover .action-arrow { transform: translateX(4px); }
+.action:active { transform: translateY(0); box-shadow: 0 1px 3px rgba(30, 27, 75, .1); }
+.action:focus-visible { outline: 3px solid var(--t-fg); outline-offset: 2px; }
+.action-blue   { --t-bg: #e8f1ff; --t-fg: #1d4ed8; --t-edge: #bcd3fb; }
+.action-cyan   { --t-bg: #e3f7fa; --t-fg: #0e7490; --t-edge: #b2e4ec; }
+.action-purple { --t-bg: #f1eaff; --t-fg: #6d28d9; --t-edge: #d6c3f7; }
+.action-green  { --t-bg: #e6f7ec; --t-fg: #15803d; --t-edge: #bde5c9; }
+.action-orange { --t-bg: #fff1e2; --t-fg: #c2410c; --t-edge: #f6d3ae; }
+.action-indigo { --t-bg: #eaecff; --t-fg: #4338ca; --t-edge: #c7cbf6; }
+@media (max-width: 800px) { .action { min-height: 54px; } }
+@media (prefers-reduced-motion: reduce) { .action:hover { transform: none; } .action:hover .action-arrow { transform: none; } }

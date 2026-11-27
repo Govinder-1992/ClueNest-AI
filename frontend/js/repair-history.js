@@ -155,7 +155,8 @@ const RepairHistory = (() => {
       </article>`;
   }
 
-  async function renderList(root, userId) {
+  // ctxId (optional): the appliance whose card opened this screen; only that appliance's records are shown.
+  async function renderList(root, userId, ctxId) {
     const myHash = location.hash;
     shell(root, "Repair History", SUB, loadingBox("Loading your repair history…"), null, false);
     let records;
@@ -168,6 +169,17 @@ const RepairHistory = (() => {
       return;
     }
     if (location.hash !== myHash) return;
+    if (!ctxId && ui.fromCard) { ui.appliance = ""; ui.fromCard = false; } // do not keep a card filter when opened from the menu
+    if (ctxId) {
+      ui.appliance = ctxId; ui.fromCard = true;
+      if (!records.some(r => r.applianceId === ctxId)) {
+        shell(root, "Repair History", SUB, notice("🧰", "No repair records for this appliance yet",
+          "When this appliance is repaired, add a record to keep track of the problem, the repair and what it cost.",
+          '<a class="btn btn-primary" href="#/repair-history?mode=add&id=' + encodeURIComponent(ctxId) + '">+ Add Repair Record</a> ' +
+          '<a class="btn" href="#/repair-history">View all repair history</a>'), null, false);
+        return;
+      }
+    }
     const sum = summarize(records);
     const apps = [...new Map(records.map(r => [r.applianceId, r.applianceName || "Unnamed appliance"])).entries()];
     if (ui.appliance && !apps.some(a => a[0] === ui.appliance)) ui.appliance = "";
@@ -457,7 +469,7 @@ const RepairHistory = (() => {
     const mode = params.get("mode");
     if (params.get("view")) renderDetail(root, userId, params.get("view"));
     else if (mode === "add" || mode === "edit") renderForm(root, params, userId);
-    else renderList(root, userId);
+    else renderList(root, userId, params.get("id"));
   }
 
   return { render, validate, buildPayload, summarize, filterSort, dateRangeError, totalCost, STATUSES };
