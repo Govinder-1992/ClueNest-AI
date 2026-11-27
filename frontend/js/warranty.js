@@ -3,6 +3,8 @@ const WarrantyChecker = (() => {
   const MAX_RESPONSE = 1000;
   const INFO = "Warranty coverage depends on the manufacturer's terms, appliance condition and type of fault. Please confirm coverage with the manufacturer or retailer.";
   const COVERED_MSG = "Your manufacturer or warranty provider has indicated that this issue is covered.";
+  const GOOD_NEWS_TITLE = "Good News! Your Appliance Is Under Warranty.";
+  const GOOD_NEWS_TEXT = "Your appliance is still covered by warranty. Before paying for any repairs, contact the store where you purchased it or the manufacturer to request warranty service.";
 
   // ---------- pure logic (also used by tests) ----------
   function pad(n) { return String(n).padStart(2, "0"); }
@@ -146,6 +148,31 @@ const WarrantyChecker = (() => {
       <p>${esc(text)}</p>${extra || ""}</div>`;
   }
 
+  // Guidance only. ClueNest does not know the store's or manufacturer's contact details, so none are shown.
+  function contactGuideHtml(a, w, problem) {
+    const li = t => `<li>${t}</li>`;
+    const store = a.storeName ? ` (${esc(a.storeName)})` : "";
+    const detail = (label, v) => `<li><b>${esc(label)}:</b> ${esc(v || "Not provided")}</li>`;
+    const issue = problem ? [problem.category, problem.errorCode ? "error code " + problem.errorCode : "", problem.description].filter(Boolean).join(" - ") : "";
+    return `
+      <h3>How to request warranty service</h3>
+      <ol>
+        ${li("Find your <b>proof of purchase</b>, such as the receipt, invoice or online order confirmation.")}
+        ${li(`Contact <b>the store where you bought it</b>${store} first, using the contact details on your receipt, your order confirmation or the store's own website.`)}
+        ${li("Or contact <b>the manufacturer</b> using the support details in the user manual, on the appliance label or on the manufacturer's official website.")}
+        ${li("Explain the problem" + (issue ? " (" + esc(issue) + ")" : "") + " and ask them to arrange warranty service.")}
+        ${li("<b>Before you pay for any repair</b>, or let anyone open the appliance, confirm that the warranty covers it. Ask for a claim or reference number and keep it.")}
+      </ol>
+      <h3>Have these details ready</h3>
+      <ul>
+        ${detail("Appliance", [a.brand, a.model].filter(Boolean).join(" "))}
+        ${detail("Serial number", a.serialNumber)}
+        ${detail("Purchase date", w.purchase ? fmt(w.purchase) : "")}
+        ${detail("Warranty expires", w.expiry ? fmt(w.expiry) : "")}
+      </ul>
+      <p class="wg-note">ClueNest AI does not have contact details for your store or manufacturer and has not made a warranty claim for you. Warranty terms vary, so please confirm what is covered.</p>`;
+  }
+
   // Fresh data from the API when signed in; otherwise the copy saved when the user chose the appliance.
   async function loadAppliance(id) {
     if (Auth.isConfigured() && Auth.isAuthenticated()) {
@@ -200,6 +227,26 @@ const WarrantyChecker = (() => {
         ${problem.description ? `<li><b>Description:</b> ${esc(problem.description)}</li>` : ""}
       </ul></section>` : "";
 
+    // An active warranty ends this workflow here: the user is pointed to the store or manufacturer instead of
+    // Repair vs Replace or Find Technician. Expired, unknown and no-warranty appliances keep the existing steps.
+    const underWarranty = w.status === "Active";
+    const goodNewsHtml = underWarranty ? `
+      <section class="warranty-good" id="underWarranty" aria-labelledby="wgTitle">
+        <div class="wg-head">
+          <span class="wg-icon" aria-hidden="true">✅</span>
+          <div>
+            <h2 id="wgTitle">${esc(GOOD_NEWS_TITLE)}</h2>
+            <p>${esc(GOOD_NEWS_TEXT)}</p>
+          </div>
+        </div>
+        <div class="wg-actions">
+          <button type="button" class="wg-btn wg-primary" id="contactBtn" aria-expanded="false" aria-controls="contactGuide">
+            <span aria-hidden="true">📞</span> Contact Store / Manufacturer</button>
+          <a class="wg-btn wg-secondary" id="backApplBtn" href="#/appliances"><span aria-hidden="true">←</span> Back to My Appliances</a>
+        </div>
+        <div class="wg-guide" id="contactGuide" hidden>${contactGuideHtml(appliance, w, problem)}</div>
+      </section>` : "";
+
     shell(root, id, `
       <div class="card selected-card">
         <div class="card-head">
@@ -215,6 +262,7 @@ const WarrantyChecker = (() => {
           ${row("Warranty expiry", fmt(w.expiry) + expiryNote)}
         </dl>
       </div>
+      ${underWarranty ? goodNewsHtml : ""}
       ${missing}
       <section class="result-block"><h2>Warranty Overview</h2>
         <dl class="meta">
@@ -228,7 +276,7 @@ const WarrantyChecker = (() => {
         <div class="alert alert-info" style="margin:0">An active warranty date does not guarantee that a particular fault is covered. ${esc(INFO)}</div>
       </section>
       ${problemHtml}
-      <section class="result-block"><h2>Warranty response</h2>
+      ${underWarranty ? "" : `<section class="result-block"><h2>Warranty response</h2>
         <div class="form-field"><label for="wResponse">Describe the warranty response (optional)</label>
           <textarea id="wResponse" rows="4" maxlength="${MAX_RESPONSE}" placeholder="Enter any information received from the manufacturer or retailer."></textarea></div>
       </section>
@@ -238,9 +286,24 @@ const WarrantyChecker = (() => {
           <button class="btn btn-warn" id="notCoveredBtn">Not Covered</button>
         </div>
         <div id="decisionMsg" role="status"></div>
-      </div>`);
+      </div>`}`);
 
     const $ = s => root.querySelector(s);
+
+    if (underWarranty) {
+      // The status is saved with the other workflow context. It is worked out from the appliance's own dates,
+      // so the appliance record is not changed and the dashboard always shows the same status.
+      Navigation.setWarrantyContext({ applianceId: appliance.id, status: w.status, decision: "Under Warranty", response: "" });
+      Navigation.selectAppliance(appliance);
+      const btn = $("#contactBtn"), guide = $("#contactGuide");
+      btn.addEventListener("click", () => {
+        guide.hidden = !guide.hidden;
+        btn.setAttribute("aria-expanded", String(!guide.hidden));
+        if (!guide.hidden) guide.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      });
+      return;
+    }
+
     const responseText = () => $("#wResponse").value.trim();
 
     $("#coveredBtn").addEventListener("click", () => {
@@ -258,7 +321,7 @@ const WarrantyChecker = (() => {
     });
   }
 
-  return { render, loadAppliance, todayString, computeWarranty, dateOnly, parseYears, diffYMD, remainingText, COVERED_MSG, INFO };
+  return { render, loadAppliance, todayString, computeWarranty, dateOnly, parseYears, diffYMD, remainingText, COVERED_MSG, INFO, GOOD_NEWS_TITLE, GOOD_NEWS_TEXT };
 })();
 
 if (typeof module !== "undefined") module.exports = WarrantyChecker;

@@ -25,7 +25,9 @@ function normalize(a) {
     createdAt: a.createdAt ?? a.created_at ?? a.registeredAt ?? a.registered_at ?? "",
     warrantyYears: a.warrantyYears ?? a.warrantyDuration ?? a.warranty_years ?? a.warranty_duration ?? null,
     warrantyStart: a.warrantyStart ?? a.warrantyStartDate ?? a.warranty_start ?? a.warranty_start_date ?? "",
-    warrantyProvider: a.warrantyProvider ?? a.warranty_provider ?? a.provider ?? ""
+    warrantyProvider: a.warrantyProvider ?? a.warranty_provider ?? a.provider ?? "",
+    serialNumber: a.serialNumber ?? a.serial_number ?? "",
+    storeName: a.storeName ?? a.store_name ?? ""
   };
 }
 
