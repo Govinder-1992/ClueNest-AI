@@ -1,5 +1,7 @@
 """ClueNest AI - AI troubleshooting function.
     POST /troubleshoot    body: applianceId, category, description, errorCode (optional)
+    POST /troubleshoot    body: action "save-result" ... saves the outcome of a troubleshooting session
+                          (see save_result below). No AI answer is produced for this request.
 Flow:
   1. Validate the request and confirm the appliance belongs to the signed-in user.
   2. Safety rules: if the text describes a gas smell, smoke or burning smell, sparks, exposed
@@ -13,8 +15,13 @@ Flow:
      Any other value of TROUBLESHOOT_MODE is treated as MOCK, so a typo can never start paid model calls.
 In BEDROCK mode, if Bedrock cannot answer (busy, no quota, not allowed, timeout, unusable answer) the
 function returns an error and never falls back to the demo answers, so a demo answer can never be
-mistaken for an AI answer. Nothing is saved, and neither the request
+mistaken for an AI answer. An AI answer is never saved, and neither the request
 text nor the model answer is written to the logs.
+
+Saving the outcome ("Problem Fixed"): the app sends action "save-result" with a resultId that it creates
+once for each answer it shows. DynamoDB: PK = USER#<sub>, SK = TROUBLESHOOT#<resultId>. The save is
+idempotent: sending the same resultId again returns the stored record and never creates a second one.
+The record keeps the user's own problem description, not the AI answer.
 """
 import json
 import logging
@@ -24,7 +31,11 @@ import boto3
 import mock_troubleshooting
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
-from cluenest_common import ApiError, ID_RE, Validator, get_method, load_appliance, parse_body, run
+from boto3.dynamodb.conditions import Attr
+from cluenest_common import (
+    ApiError, ID_RE, Validator, appliance_snapshot, get_item, get_method, is_conditional_failure, load_appliance,
+    now_iso, parse_body, pick, pk_for, put_item, run,
+)
 
 LOG = logging.getLogger()
 CATEGORIES = ["Not Turning On", "Making Unusual Noise", "Not Cooling or Heating", "Leaking Water",
@@ -38,6 +49,59 @@ MODEL_READ_TIMEOUT_SECONDS = 20
 
 DISCLAIMER = ("These are possible causes, not a confirmed diagnosis. "
               "If you are unsure or the problem continues, contact a qualified technician.")
+
+# ---------------------------------------------------------------- saving the outcome
+RESULT_OUTCOMES = ["resolved"]
+RESULT_KEYS = ["applianceId", "applianceName", "applianceBrand", "applianceModel", "applianceType",
+               "category", "errorCode", "description", "outcome", "resolvedAt", "createdAt"]
+
+
+def validate_result(body):
+    v = Validator(body)
+    v.text("resultId", 64, required=True)
+    v.text("applianceId", 64, required=True)
+    v.choice("category", CATEGORIES)
+    v.text("description", 2000, multiline=True)
+    v.text("errorCode", 50)
+    v.choice("outcome", RESULT_OUTCOMES)
+    for key in ("resultId", "applianceId"):
+        if key in v.values and not ID_RE.fullmatch(v.values[key]):
+            v.errors.setdefault(key, "This is not a valid ID.")
+    v.check()
+    return v.values
+
+
+def result_to_public(item):
+    out = {"id": item["id"]}
+    out.update(pick(item, RESULT_KEYS))
+    return out
+
+
+def save_result(sub, body):
+    """Save that the user's problem was resolved. Sending the same resultId again returns the saved record."""
+    values = validate_result(body)
+    appliance = load_appliance(sub, values["applianceId"])
+    if appliance is None:
+        raise ApiError(404, "APPLIANCE_NOT_FOUND", "The selected appliance was not found.")
+    now = now_iso()
+    item = {"PK": pk_for(sub), "SK": "TROUBLESHOOT#" + values["resultId"], "entityType": "TROUBLESHOOT",
+            "userId": sub, "id": values["resultId"]}
+    item.update(appliance_snapshot(appliance))
+    for key in ("category", "errorCode", "description", "outcome"):
+        if key in values:
+            item[key] = values[key]
+    item["resolvedAt"] = now
+    item["createdAt"] = now
+    try:
+        put_item(item, condition=Attr("PK").not_exists())
+    except ClientError as error:
+        if not is_conditional_failure(error):
+            raise
+        existing = get_item(sub, item["SK"])
+        if existing is None:
+            raise
+        return 200, {"result": result_to_public(existing), "duplicate": True}
+    return 201, {"result": result_to_public(item), "duplicate": False}
 
 # ---------------------------------------------------------------- safety rules (no AI involved)
 _FLAGS = re.IGNORECASE
@@ -140,7 +204,10 @@ def handler(event, context):
 def route(event, sub):
     if get_method(event) != "POST":
         raise ApiError(405, "METHOD_NOT_ALLOWED", "This operation is not supported.")
-    return troubleshoot(sub, parse_body(event))
+    body = parse_body(event)
+    if body.get("action") == "save-result":
+        return save_result(sub, body)
+    return troubleshoot(sub, body)
 
 
 def validate_request(body):

@@ -72,6 +72,16 @@ const Api = (() => {
     return request("/troubleshoot", { method: "POST", body: payload });
   }
 
+  // POST /troubleshoot with action "save-result": saves that the problem was resolved. resultId is created once for each
+  // answer shown, so sending it again (a retry) returns the same record and never creates a second one.
+  async function saveTroubleshootingResult(payload) {
+    const data = await request("/troubleshoot", { method: "POST", body: Object.assign({}, payload, { action: "save-result", outcome: "resolved" }) });
+    // A server that does not know "save-result" would answer with a troubleshooting result instead. Treat that as a failure.
+    if (!data || !data.result || typeof data.result.id !== "string") {
+      throw new ApiError("http", "The result could not be saved because the service does not support saving yet.");
+    }
+    return data.result;
+  }
   // GET <technicianSearchPath>?location=...&radiusKm=...&applianceType=...
   // The backend performs the Google Places search; no Google key is used here.
   async function searchTechnicians(query) {
@@ -118,7 +128,7 @@ const Api = (() => {
     const data = await request(idPath("/maintenance", id) + "/complete", { method: "POST", body: { completedDate } });
     return { completed: itemOf(data, "completed"), next: itemOf(data, "next") };
   }
-  return { getAppliances, createAppliance, troubleshoot, searchTechnicians, getNotificationPreferences, setMaintenanceEmail,
+  return { getAppliances, createAppliance, troubleshoot, saveTroubleshootingResult, searchTechnicians, getNotificationPreferences, setMaintenanceEmail,
     getRepairRecords, createRepairRecord, updateRepairRecord, deleteRepairRecord,
     getMaintenanceReminders, createMaintenanceReminder, updateMaintenanceReminder, deleteMaintenanceReminder, completeMaintenanceReminder };
 })();

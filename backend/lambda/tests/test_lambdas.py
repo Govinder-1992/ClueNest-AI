@@ -2574,5 +2574,109 @@ class SecurityTests(Base):
             self.assertEqual(r.status, 401, sneaky)
 
 
+# ======================================================================== saving the outcome of a troubleshooting session
+RESULT_A = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
+RESULT_B = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
+
+
+class SaveTroubleshootingResultTests(Base):
+    def setUp(self):
+        super().setUp()
+        self.aid = self.make_appliance(name="Laundry Washer", type="Washing Machine", brand="Bosch")
+        guard = mock.patch.object(troubleshoot, "bedrock_client", side_effect=AssertionError("The AI must not be called when saving"))
+        guard.start()
+        self.addCleanup(guard.stop)
+
+    def body(self, **over):
+        b = {"action": "save-result", "resultId": RESULT_A, "applianceId": self.aid, "category": "Not Draining",
+             "description": "Water stays in the drum", "outcome": "resolved"}
+        b.update(over)
+        return b
+
+    def save(self, sub=SUB_A, **over):
+        return self.call(troubleshoot, "POST", "/troubleshoot", sub=sub, body=self.body(**over))
+
+    def stored(self):
+        return [i for i in self.raw_items() if i["SK"].startswith("TROUBLESHOOT#")]
+
+    def test_saves_a_resolved_record_without_calling_the_ai(self):
+        r = self.save()
+        self.assertEqual(r.status, 201, r.text)
+        rec = r.body["result"]
+        self.assertEqual((rec["id"], rec["outcome"], rec["category"], rec["description"]), (RESULT_A, "resolved", "Not Draining", "Water stays in the drum"))
+        self.assertEqual((rec["applianceId"], rec["applianceName"], rec["applianceBrand"], rec["applianceType"]), (self.aid, "Laundry Washer", "Bosch", "Washing Machine"))
+        self.assertIn("resolvedAt", rec)
+        self.assertFalse(r.body["duplicate"])
+        self.assertFalse(INTERNAL_KEYS & set(rec))
+        item = self.raw_item(SUB_A, "TROUBLESHOOT#" + RESULT_A)
+        self.assertEqual((item["userId"], item["entityType"], item["outcome"]), (SUB_A, "TROUBLESHOOT", "resolved"))
+
+    def test_sending_the_same_result_again_never_creates_a_second_record(self):
+        first = self.save()
+        again = self.save()
+        self.assertEqual((first.status, again.status), (201, 200))
+        self.assertTrue(again.body["duplicate"])
+        self.assertEqual(again.body["result"]["resolvedAt"], first.body["result"]["resolvedAt"])
+        self.assertEqual(len(self.stored()), 1)
+
+    def test_different_results_are_separate_records(self):
+        self.assertEqual(self.save().status, 201)
+        self.assertEqual(self.save(resultId=RESULT_B, category="Leaking Water").status, 201)
+        self.assertEqual(len(self.stored()), 2)
+
+    def test_optional_fields_are_left_out(self):
+        rec = self.save(description=None, errorCode=None).body["result"]
+        self.assertNotIn("description", rec)
+        self.assertNotIn("errorCode", rec)
+        rec = self.save(resultId=RESULT_B, category="Error Code", errorCode="E24").body["result"]
+        self.assertEqual(rec["errorCode"], "E24")
+
+    def test_validation(self):
+        r = self.call(troubleshoot, "POST", "/troubleshoot", body={"action": "save-result"})
+        self.assertEqual(r.status, 400)
+        self.assertEqual(set(r.body["fields"]), {"resultId", "applianceId", "category", "outcome"})
+        for over in ({"outcome": "fixed"}, {"outcome": "Resolved"}, {"category": "Smells funny"}, {"resultId": "not-an-id"},
+                     {"resultId": "TROUBLESHOOT#x"}, {"applianceId": "nope"}, {"description": "d" * 2001}, {"errorCode": "e" * 51}):
+            self.assertEqual(self.save(**over).status, 400, over)
+        self.assertEqual(len(self.stored()), 0)
+
+    def test_someone_elses_appliance_is_not_found(self):
+        other = self.make_appliance(sub=SUB_B)
+        r = self.save(applianceId=other)
+        self.assertEqual((r.status, r.body["code"]), (404, "APPLIANCE_NOT_FOUND"))
+        self.assertEqual(len(self.stored()), 0)
+
+    def test_users_are_isolated_even_with_the_same_result_id(self):
+        other = self.make_appliance(sub=SUB_B)
+        self.assertEqual(self.save().status, 201)
+        self.assertEqual(self.save(sub=SUB_B, applianceId=other).status, 201)
+        self.assertEqual(len(self.stored()), 2)
+        self.assertIsNotNone(self.raw_item(SUB_B, "TROUBLESHOOT#" + RESULT_A))
+
+    def test_other_records_are_untouched(self):
+        repair_id = self.make_repair(self.aid)
+        reminder_id = self.make_reminder(self.aid)
+        before = {(i["PK"], i["SK"]): i for i in self.raw_items()}
+        self.assertEqual(self.save().status, 201)
+        after = {(i["PK"], i["SK"]): i for i in self.raw_items()}
+        for key, item in before.items():
+            self.assertEqual(after[key], item, key)
+        self.assertEqual(len(after), len(before) + 1)
+        self.assertIsNotNone(self.raw_item(SUB_A, "REPAIR#" + repair_id))
+        self.assertIsNotNone(self.raw_item(SUB_A, "MAINTENANCE#" + reminder_id))
+
+    def test_needs_a_signed_in_user(self):
+        self.assertEqual(self.call(troubleshoot, "POST", "/troubleshoot", sub=None, body=self.body()).status, 401)
+
+    def test_a_request_without_the_action_is_still_a_normal_troubleshooting_request(self):
+        body = self.body()
+        del body["action"]
+        body.pop("resultId")
+        body.pop("outcome")
+        r = self.call(troubleshoot, "POST", "/troubleshoot", body=body)
+        self.assertEqual(r.status, 200, r.text)
+        self.assertNotIn("result", r.body)
+        self.assertEqual(len(self.stored()), 0)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

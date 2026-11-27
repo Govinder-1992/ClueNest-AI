@@ -220,3 +220,19 @@ body.landing .content > * { animation: none; }
 .wg-note { margin: 0; color: var(--muted); font-size: 13px; }
 @media (max-width: 800px) { .wg-actions { grid-template-columns: 1fr; } .warranty-good { padding: 18px; } .wg-head h2 { font-size: 19px; } }
 @media (prefers-reduced-motion: reduce) { .wg-btn:hover { transform: none; } }
+
+/* ---------- maintenance reminder: recommendations after "Problem Fixed" ---------- */
+.rec-box { max-width: 900px; margin: 0 0 20px; padding: 20px; border-radius: 16px; border: 1px solid #c7d2fe; background: linear-gradient(135deg, #eef2ff 0%, #e3f7fa 100%); }
+.rec-box h2 { margin: 0 0 4px; font-size: 18px; color: var(--navy); }
+.rec-box p { margin: 0 0 14px; font-size: 14px; }
+.rec-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
+.rec-item { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; text-align: left; min-height: 64px; padding: 12px 14px; border-radius: 12px;
+  border: 1px solid #c7d2fe; background: #fff; color: var(--text); font: inherit; cursor: pointer; box-shadow: 0 2px 6px rgba(30, 27, 75, .08);
+  transition: transform 200ms ease, box-shadow 200ms ease, border-color 200ms ease; }
+.rec-item strong { font-size: 14.5px; }
+.rec-item span { font-size: 12.5px; color: var(--muted); }
+.rec-item:hover { transform: translateY(-2px); border-color: var(--accent); box-shadow: 0 8px 18px rgba(30, 27, 75, .14); }
+.rec-item[aria-pressed="true"] { border-color: var(--accent); background: #eef2ff; box-shadow: 0 0 0 2px var(--accent); }
+.rec-item:focus-visible { outline: 3px solid var(--navy-light); outline-offset: 2px; }
+@media (max-width: 800px) { .rec-grid { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) { .rec-item:hover { transform: none; } }

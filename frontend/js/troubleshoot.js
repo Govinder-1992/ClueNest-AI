@@ -256,6 +256,9 @@ const Troubleshoot = (() => {
       }
     }
 
+    const newResultId = () => (window.crypto && typeof window.crypto.randomUUID === "function") ? window.crypto.randomUUID()
+      : "xxxxxxxx-xxxx-4xxx-8xxx-xxxxxxxxxxxx".replace(/x/g, () => Math.floor(Math.random() * 16).toString(16));
+
     function wireDecisions(p) {
       const goWarranty = () => {
         Navigation.setProblemContext({ applianceId: appliance.id, category: p.category,
@@ -263,14 +266,37 @@ const Troubleshoot = (() => {
         Navigation.selectAppliance(appliance);
         Navigation.go("warranty-checker", appliance.id);
       };
+      // Problem Fixed: save the outcome, then go straight to Maintenance & Reminders. Warranty, Repair vs Replace and
+      // Find Technician are skipped. resultId belongs to this answer, so a retry can never save a second record.
+      const resultId = newResultId();
+      let saving = false, saved = false;
       const fixed = $("#fixedBtn");
-      if (fixed) fixed.addEventListener("click", () => {
-        // No repair-history API exists yet, so the outcome is not saved anywhere.
-        $("#decisionMsg").innerHTML = `<div class="alert alert-success">Great, glad it's fixed! This outcome was not saved because repair history is not available yet.</div>`;
-        fixed.disabled = true;
-        $("#stillBtn").disabled = true;
-      });
-      $("#stillBtn").addEventListener("click", goWarranty);
+      if (fixed) fixed.addEventListener("click", async () => {
+        if (saving || saved) return;
+        saving = true;
+        const label = fixed.querySelector("span");
+        const still = $("#stillBtn");
+        fixed.disabled = true; still.disabled = true;
+        if (label) label.textContent = "Saving…";
+        $("#decisionMsg").innerHTML = "";
+        try {
+          const rec = {
+            resultId, applianceId: appliance.id, category: p.category };
+          if (p.description) rec.description = p.description;
+          if (p.errorCode) rec.errorCode = p.errorCode;
+          await Api.saveTroubleshootingResult(rec);
+          saved = true;
+          Navigation.setTroubleshootFixedContext({ applianceId: appliance.id, resultId, category: p.category,
+            description: p.description || "", errorCode: p.errorCode || "" });
+          Navigation.selectAppliance(appliance);
+          Navigation.go("maintenance-reminder", appliance.id, { from: "troubleshoot" });
+        } catch (err) {
+          saving = false;
+          fixed.disabled = false; still.disabled = false;
+          if (label) label.textContent = "Problem Fixed";
+          $("#decisionMsg").innerHTML = `<div class="alert alert-error">The result was not saved. ${esc(err.message)} You can try again.</div>`;
+        }
+      });      $("#stillBtn").addEventListener("click", goWarranty);
     }
 
     $("#tsForm").addEventListener("submit", e => {

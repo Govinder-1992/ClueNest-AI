@@ -130,7 +130,24 @@ const Navigation = (() => {
   function clearRepairCompletedContext() {
     sessionStorage.removeItem(REPAIR_DONE_KEY);
   }
-  return { MENU, ACTIONS, parse, go, setRepairCompletedContext, getRepairCompletedContext, clearRepairCompletedContext, selectAppliance, getSelectedAppliance, setProblemContext, getProblemContext,
+  // A troubleshooting session that was saved as resolved ("Problem Fixed"), carried to the Maintenance Reminder form.
+  const FIXED_KEY = "cluenest_troubleshoot_fixed_context";
+  function setTroubleshootFixedContext(ctx) {
+    sessionStorage.setItem(FIXED_KEY, JSON.stringify(ctx));
+  }
+  function getTroubleshootFixedContext(id) {
+    try {
+      const c = JSON.parse(sessionStorage.getItem(FIXED_KEY));
+      return c && String(c.applianceId) === String(id) ? c : null;
+    } catch (e) {
+      return null;
+    }
+  }
+  function clearTroubleshootFixedContext() {
+    sessionStorage.removeItem(FIXED_KEY);
+  }
+  return { MENU, ACTIONS, parse, go, setRepairCompletedContext, getRepairCompletedContext, clearRepairCompletedContext,
+    setTroubleshootFixedContext, getTroubleshootFixedContext, clearTroubleshootFixedContext, selectAppliance, getSelectedAppliance, setProblemContext, getProblemContext,
     setWarrantyContext, getWarrantyContext, setRepairContext, getRepairContext,
     setTechnicianContext, getTechnicianContext };
 })();

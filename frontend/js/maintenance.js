@@ -76,6 +76,68 @@ const MaintenanceScreen = (() => {
       dueDate: v.dueDate, repeat: v.repeat, notes: v.notes };
   }
 
+  // ---------- recommendations after a problem was fixed ----------
+  // Only safe routine tasks a homeowner can do without opening the appliance. They are suggestions: choosing one
+  // fills in the form, and nothing is saved until the user saves the reminder.
+  const MONTHS_TO_REPEAT = { 1: "monthly", 3: "quarterly", 6: "semiannual", 12: "yearly" };
+  const TYPE_TASKS = {
+    "refrigerator": [
+      { name: "Clean refrigerator condenser coils", months: 6, description: "Unplug the fridge and vacuum dust from the coils you can reach safely." },
+      { name: "Check and wipe the door seals", months: 3, description: "Look for gaps or cracks so the cold air stays in." },
+      { name: "Replace the water filter", months: 6, description: "If your model has one, replace it as the manual describes." }],
+    "washing machine": [
+      { name: "Clean the drain pump filter", months: 3, description: "Place towels and a tray under the small filter door, then clear lint, coins and debris." },
+      { name: "Run a tub clean cycle", months: 1, description: "Run an empty hot cycle with a washing machine cleaner." },
+      { name: "Inspect hoses for kinks or leaks", months: 6, description: "Check the fill and drain hoses where you can see them." }],
+    "dryer": [
+      { name: "Deep clean the lint trap and housing", months: 3, description: "Wash the lint filter and vacuum the slot it sits in." },
+      { name: "Inspect the vent hose and outside vent", months: 6, description: "Make sure air flows freely and nothing blocks the outside vent." }],
+    "dishwasher": [
+      { name: "Clean the dishwasher filter", months: 1, description: "Remove the filter, rinse off food and grease, and put it back." },
+      { name: "Run a dishwasher cleaning cycle", months: 3, description: "Run an empty cycle with a dishwasher cleaner." },
+      { name: "Check the spray arms for clogs", months: 6, description: "Clear any blocked holes with a toothpick." }],
+    "oven": [
+      { name: "Deep clean the oven", months: 6, description: "Follow the manual's cleaning instructions and wipe the door seal." },
+      { name: "Check the oven door seal", months: 6, description: "Look for tears or gaps." }],
+    "microwave": [
+      { name: "Clean the microwave interior and door seal", months: 1, description: "Wipe the inside and the edge of the door." },
+      { name: "Check the turntable and vents", months: 6, description: "Make sure the turntable turns freely and the vents are clear." }],
+    "air conditioner": [
+      { name: "Clean or replace the air filter", months: 1, description: "A dirty filter reduces cooling and can cause problems." },
+      { name: "Clean the outdoor unit", months: 6, description: "Clear leaves and debris from around the unit." },
+      { name: "Book a yearly service check", months: 12, description: "Have a qualified technician check the system once a year." }]
+  };
+  const DEFAULT_TASKS = [
+    { name: "Clean accessible filters and vents", months: 3, description: "Use the manual to find the filters and vents you can clean safely." },
+    { name: "Inspect the power cord, hoses and seals", months: 6, description: "Look for wear or damage and stop using the appliance if you see any." }];
+  const ISSUE_TASKS = {
+    "Not Draining": { name: "Check the drain hose and filter", months: 3, description: "Look for kinks or blockages that stop water from draining." },
+    "Leaking Water": { name: "Check hoses and seals for leaks", months: 1, description: "Look for drips or damp patches around hoses, seals and the door." },
+    "Not Cooling or Heating": { name: "Clean vents, coils and filters", months: 3, description: "Dust and blocked airflow are common reasons for poor cooling or heating." },
+    "Making Unusual Noise": { name: "Check that the appliance is level and nothing is loose", months: 6, description: "An uneven floor or loose items can cause noise and vibration." },
+    "Not Turning On": { name: "Check the power cord, plug and outlet", months: 6, description: "Make sure the plug is firm and the cord is not damaged." },
+    "Error Code": { name: "Review the manual and note any repeating error code", months: 3, description: "If the same code returns, contact a qualified technician." },
+    "Not Working Properly": { name: "Run a quick performance check", months: 3, description: "Run a normal cycle and note anything unusual." }
+  };
+
+  // Up to 5 suggestions: the one for the problem that was just fixed first, then routine tasks for the appliance type.
+  function recommend(applianceType, category) {
+    const type = String(applianceType || "").trim().toLowerCase();
+    const list = [];
+    if (ISSUE_TASKS[category]) list.push(ISSUE_TASKS[category]);
+    list.push(...(TYPE_TASKS[type] || DEFAULT_TASKS));
+    const seen = new Set();
+    return list.filter(r => { const k = r.name.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; })
+      .slice(0, 5).map(r => Object.assign({}, r, { repeat: MONTHS_TO_REPEAT[r.months] || "once" }));
+  }
+
+  // YYYY-MM-DD plus whole months, with the day kept inside the target month.
+  function addMonthsToDate(dateStr, n) {
+    const [y, m, d] = dateStr.split("-").map(Number);
+    const idx = y * 12 + (m - 1) + n;
+    const ny = Math.floor(idx / 12), nm = (idx % 12) + 1;
+    return ny + "-" + pad(nm) + "-" + pad(Math.min(d, new Date(Date.UTC(ny, nm, 0)).getUTCDate()));
+  }
   function summarize(tasks, today) {
     const s = { upcoming: 0, overdue: 0, completed: 0 };
     tasks.forEach(t => {
@@ -306,14 +368,26 @@ const MaintenanceScreen = (() => {
     const rc = fromRepair ? Navigation.getRepairCompletedContext(preId) : null;
     const repairNote = rc && rc.repairDate
       ? "Follow-up to the repair completed on " + rc.repairDate + (rc.company ? " by " + rc.company : "") + "." : "";
+    // Opened automatically after "Problem Fixed" in AI Troubleshooting (the result was already saved).
+    const fixedCtx = !existing && Boolean(preId) && params.get("from") === "troubleshoot" ? Navigation.getTroubleshootFixedContext(preId) : null;
     const init = existing ? existing : { applianceId: preId || "", taskName: "", description: "", dueDate: "", repeat: "once", notes: repairNote };
 
     const field = (id, label, control, required, hint) => `<div class="form-field">
       <label for="${id}">${esc(label)}${required ? ' <span class="req">*</span>' : ""}</label>${control}
       ${hint ? `<small class="muted">${esc(hint)}</small>` : ""}<div class="field-error" id="err-${id}" role="alert"></div></div>`;
 
-    const flowBanner = fromRepair ? `<div class="alert alert-success" id="flowBanner" role="status">The repair was saved${rc && rc.applianceName ? " for " + esc(rc.applianceName) : ""}.
-      You can now schedule the next maintenance for this appliance.</div>` : "";
+    const preOpt = opts.find(o => o.id === String(preId));
+    const recs = fixedCtx ? recommend(preOpt ? preOpt.a.type : "", fixedCtx.category) : [];
+    const recHtml = fixedCtx ? `
+      <div class="alert alert-success" id="fixedBanner" role="status">Great, glad it's fixed! Your troubleshooting result${preOpt ? " for " + esc(preOpt.a.name || "your appliance") : ""} was saved.
+        Schedule some maintenance to help keep it running well.</div>
+      <section class="rec-box" id="recBox"><h2>Recommended maintenance</h2>
+        <p class="muted">Based on ${preOpt && preOpt.a.type ? "your " + esc(preOpt.a.type.toLowerCase()) : "your appliance"} and the problem you just fixed (${esc(fixedCtx.category)}). Choose one to fill in the form, or enter your own.</p>
+        <div class="rec-grid">${recs.map((r, i) => `<button type="button" class="rec-item" data-i="${i}" aria-pressed="false">
+          <strong>${esc(r.name)}</strong><span>${esc(repeatLabel(r.repeat))}</span></button>`).join("")}</div>
+      </section>` : "";
+    const flowBanner = recHtml + (fromRepair ? `<div class="alert alert-success" id="flowBanner" role="status">The repair was saved${rc && rc.applianceName ? " for " + esc(rc.applianceName) : ""}.
+      You can now schedule the next maintenance for this appliance.</div>` : "");
     shell(root, title, SUB, `
       ${flowBanner}
       <div id="formMessage" role="status"></div>
@@ -350,6 +424,18 @@ const MaintenanceScreen = (() => {
     $("#applianceId").addEventListener("change", refresh);
     refresh();
 
+    // Choosing a recommendation fills in the form. Nothing is saved until the user saves the reminder.
+    root.querySelectorAll(".rec-item").forEach(btn => btn.addEventListener("click", () => {
+      const r = recs[Number(btn.dataset.i)];
+      if (!r) return;
+      $("#taskName").value = r.name;
+      $("#description").value = r.description;
+      $("#repeat").value = r.repeat;
+      $("#dueDate").value = addMonthsToDate(WarrantyChecker.todayString(), r.months);
+      root.querySelectorAll(".rec-item").forEach(b => b.setAttribute("aria-pressed", String(b === btn)));
+      $("#taskName").focus();
+    }));
+
     let saving = false;
     let saved = false; // set once the server has accepted the reminder, so it can never be created twice
     $("#mForm").addEventListener("submit", async e => {
@@ -373,6 +459,7 @@ const MaintenanceScreen = (() => {
         else await Api.createMaintenanceReminder(payload);
         saved = true;
         if (fromRepair) Navigation.clearRepairCompletedContext();
+        if (fixedCtx) Navigation.clearTroubleshootFixedContext();
         ui.flash = existing ? 'The reminder "' + values.taskName + '" was updated.' : 'The reminder "' + values.taskName + '" was saved.';
         Navigation.go("maintenance");
       } catch (err) {
@@ -400,7 +487,7 @@ const MaintenanceScreen = (() => {
     else renderList(root, userId);
   }
 
-  return { render, validate, buildPayload, classify, summarize, filterSort, dueText, REPEATS };
+  return { render, validate, buildPayload, classify, summarize, filterSort, dueText, recommend, addMonthsToDate, REPEATS };
 })();
 
 if (typeof module !== "undefined") module.exports = MaintenanceScreen;
