@@ -62,7 +62,11 @@ flowchart TD
     F -- Yes --> G[Problem Fixed]
     G -.-> M
     F -- No --> H[Warranty Checker]
-    H --> I[Repair vs Replace]
+    H --> W{Warranty status}
+    W -- Active --> X[Under warranty<br/>contact the store or manufacturer]
+    X --> Y[Back to My Appliances]
+    Y --> O
+    W -- Expired or none --> I[Repair vs Replace]
     I --> J{Decision}
     J -- Repair --> K[Find Technician]
     K --> L[Record Completed Repair]
@@ -72,7 +76,7 @@ flowchart TD
     M --> O([End])
 ```
 
-Solid arrows are working today. Dashed arrows are planned: after "Problem Fixed" and after a replacement, the user can already open Maintenance and Reminders from the appliance card, but the app does not take them there automatically yet. The "Register Replacement" screen is still a placeholder.
+Solid arrows are working today. If the warranty is active, the app shows the "Good News" message with guidance for contacting the store or manufacturer, and does not send the user to Repair vs Replace or Find Technician. If the warranty is expired or missing, the repair path continues as shown. Dashed arrows are planned: after "Problem Fixed" and after a replacement, the user can already open Maintenance and Reminders from the appliance card, but the app does not take them there automatically yet. The "Register Replacement" screen is still a placeholder.
 ### API Routes
 
 | Area | Routes |
