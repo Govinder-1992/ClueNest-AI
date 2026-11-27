@@ -121,9 +121,8 @@ const Troubleshoot = (() => {
       html += `<div class="decision">
         <h2>Did this solve the problem?</h2>
         <div class="decision-buttons">
-          ${r.hazard ? "" : '<button class="btn btn-success" id="fixedBtn">✔ Problem Fixed</button>'}
-          <button class="btn btn-warn" id="stillBtn">✖ Still Problem</button>
-          <button class="btn" id="warrantyBtn">🛡️ Check Warranty</button>
+          ${r.hazard ? "" : '<button class="decision-btn decision-fixed" id="fixedBtn"><svg class="decision-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Problem Fixed</span></button>'}
+          <button class="decision-btn decision-still" id="stillBtn"><svg class="decision-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg><span>Still Problem</span></button>
         </div>
         <div id="decisionMsg" role="status"></div></div>`;
     }
@@ -272,7 +271,6 @@ const Troubleshoot = (() => {
         $("#stillBtn").disabled = true;
       });
       $("#stillBtn").addEventListener("click", goWarranty);
-      $("#warrantyBtn").addEventListener("click", goWarranty);
     }
 
     $("#tsForm").addEventListener("submit", e => {
